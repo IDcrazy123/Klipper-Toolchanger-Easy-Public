@@ -1,0 +1,24 @@
+name: M1A readonly manager
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.9', '3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -B -c "from pathlib import Path; [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in [Path('ktc_manager/__init__.py'), Path('ktc_manager/__main__.py'), Path('ktc_manager/cli.py'), Path('ktc_manager/model.py'), Path('ktc_manager/inspector.py')]]"
+      - run: python -B -m unittest discover -s tests -v
+      - run: git diff --check
