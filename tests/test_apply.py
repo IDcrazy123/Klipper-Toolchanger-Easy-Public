@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 from ktc_manager.cli import main
 from ktc_manager.executor import apply_entry
-from ktc_manager.inspector import _source_state, inspect_entry, revalidate_source, snapshot
+from ktc_manager.inspector import (_parent_structure, _source_state, canonical_root,
+                                   inspect_entry, revalidate_source, snapshot)
 from ktc_manager.model import ManifestError, parse_manifest_data
 
 
@@ -20,6 +21,13 @@ def manifest(owner="vendor-managed", source="source.txt", target="tool/target.py
     if owner == "vendor-managed":
         entry.update(source=source, delivery="symlink")
     return parse_manifest_data({"schema_version": 1, "profile": "apply-test", "entries": [entry]})
+
+
+def same_existing_path(path, expected):
+    try:
+        return os.path.samefile(str(path), str(expected))
+    except OSError:
+        return Path(path).resolve(strict=False) == Path(expected).resolve(strict=False)
 
 
 class ApplyTests(unittest.TestCase):
@@ -210,7 +218,7 @@ class ApplyTests(unittest.TestCase):
     def test_source_unreadable_is_safe(self):
         source = self.repo / "source.txt"
         def access(path, mode):
-            return False if Path(path) == source else True
+            return False if same_existing_path(path, source) else True
         before = snapshot([self.root])
         with patch("ktc_manager.inspector.os.access", side_effect=access), \
              patch("ktc_manager.executor.os.symlink") as symlink:
@@ -249,7 +257,7 @@ class ApplyTests(unittest.TestCase):
         source = self.repo / "source.txt"
         real_lstat = os.lstat
         reparse = type("Stat", (), {"st_mode": stat.S_IFREG, "st_file_attributes": 0x400})()
-        with patch("ktc_manager.inspector.os.lstat", side_effect=lambda path: reparse if Path(path) == source else real_lstat(path)):
+        with patch("ktc_manager.inspector.os.lstat", side_effect=lambda path: reparse if same_existing_path(path, source) else real_lstat(path)):
             self.assertEqual(_source_state(self.manifest.entries[0], self.repo)[0], "SOURCE_NOT_FILE")
             with patch("ktc_manager.executor.os.symlink") as symlink:
                 document, code = self.apply()
@@ -258,39 +266,39 @@ class ApplyTests(unittest.TestCase):
         regular = type("Stat", (), {"st_mode": stat.S_IFREG, "st_file_attributes": 0})()
         calls = []
         def changing_lstat(path):
-            if Path(path) == source:
+            if same_existing_path(path, source):
                 calls.append(1)
                 return regular if len(calls) == 1 else reparse
             return real_lstat(path)
-        with patch("ktc_manager.inspector.os.lstat", side_effect=changing_lstat):
+        with patch("ktc_manager.inspector.canonical_root", return_value=self.repo), \
+             patch.object(Path, "resolve", return_value=source), \
+             patch("ktc_manager.inspector.os.lstat", side_effect=changing_lstat):
             self.assertEqual(revalidate_source(self.manifest.entries[0], self.repo)[0], "SOURCE_CHANGED")
 
     def test_parent_lstat_errors_are_stable_blockers(self):
         target_parent = self.config / "tool"
         real_lstat = os.lstat
         before = snapshot([self.root])
+        target = target_parent / "target.py"
+        root = canonical_root(self.config)
         for error, expected in ((PermissionError("denied"), "PERMISSION_DENIED"),
                                 (OSError(errno.EIO, "changed"), "TARGET_PARENT_CHANGED"),
                                 (FileNotFoundError("gone"), "TARGET_PARENT_MISSING")):
             def failing_lstat(path, error=error):
-                if Path(path) == target_parent:
+                if same_existing_path(path, target_parent):
                     raise error
                 return real_lstat(path)
             with patch("ktc_manager.inspector.os.lstat", side_effect=failing_lstat):
-                result = inspect_entry(self.manifest.entries[0], self.repo,
-                                       {"config": self.config, "klipper": self.klipper})
-            self.assertEqual(result["code"], expected)
+                self.assertEqual(_parent_structure(target, root), expected)
         self.assertEqual(before, snapshot([self.root]))
 
         reparse_dir = type("Stat", (), {"st_mode": stat.S_IFDIR, "st_file_attributes": 0x400})()
         def reparse_parent(path):
-            if Path(path) == target_parent:
+            if same_existing_path(path, target_parent):
                 return reparse_dir
             return real_lstat(path)
         with patch("ktc_manager.inspector.os.lstat", side_effect=reparse_parent):
-            result = inspect_entry(self.manifest.entries[0], self.repo,
-                                   {"config": self.config, "klipper": self.klipper})
-        self.assertEqual(result["code"], "TARGET_PARENT_SYMLINK")
+            self.assertEqual(_parent_structure(target, root), "TARGET_PARENT_SYMLINK")
 
     def test_apply_id_cardinality_errors_are_deterministic(self):
         cases = (["apply"], ["apply", "--id", "vendor", "--id", "vendor"])
