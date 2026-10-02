@@ -276,11 +276,11 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(revalidate_source(self.manifest.entries[0], self.repo)[0], "SOURCE_CHANGED")
 
     def test_parent_lstat_errors_are_stable_blockers(self):
-        target_parent = self.config / "tool"
+        root = canonical_root(self.config)
+        target_parent = root / "tool"
         real_lstat = os.lstat
         before = snapshot([self.root])
         target = target_parent / "target.py"
-        root = canonical_root(self.config)
         for error, expected in ((PermissionError("denied"), "PERMISSION_DENIED"),
                                 (OSError(errno.EIO, "changed"), "TARGET_PARENT_CHANGED"),
                                 (FileNotFoundError("gone"), "TARGET_PARENT_MISSING")):
