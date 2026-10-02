@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 
 from .model import Entry, Manifest
@@ -15,7 +16,19 @@ BLOCKER_CODES = {
 
 
 def _lexists(path):
-    return path.exists() or path.is_symlink()
+    try:
+        return path.exists() or _is_link_or_reparse(path)
+    except OSError:
+        return False
+
+
+def _is_link_or_reparse(path):
+    info = os.lstat(str(path))
+    return _stat_is_link_or_reparse(info)
+
+
+def _stat_is_link_or_reparse(info):
+    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
 
 
 def canonical_root(path):
@@ -58,18 +71,15 @@ def _target_escape(target, root):
     return False
 
 
-def _target_permission(target):
-    current = target.parent
-    while not _lexists(current) and current != current.parent:
-        current = current.parent
-    return os.access(str(current), os.W_OK | os.X_OK)
-
-
 def _source_state(entry, repo_root):
     source = _source_path(entry, repo_root)
-    if not source.exists() and not source.is_symlink():
+    try:
+        info = os.lstat(str(source))
+    except FileNotFoundError:
         return "SOURCE_MISSING", source
-    if source.is_symlink() or not source.is_file():
+    except (OSError, RuntimeError):
+        return "SOURCE_NOT_FILE", source
+    if _stat_is_link_or_reparse(info) or not stat.S_ISREG(info.st_mode):
         return "SOURCE_NOT_FILE", source
     if not os.access(str(source), os.R_OK):
         return "SOURCE_UNREADABLE", source
@@ -80,47 +90,123 @@ def _source_state(entry, repo_root):
     return None, source
 
 
-def inspect(manifest: Manifest, repo_root, klipper_root, config_root):
+def revalidate_source(entry, repo_root):
+    """Recheck the trusted source immediately before the apply syscall."""
     repo = canonical_root(repo_root)
+    source = _source_path(entry, repo)
+    try:
+        info = os.lstat(str(source))
+    except (OSError, RuntimeError):
+        return "SOURCE_CHANGED", source
+    if _stat_is_link_or_reparse(info):
+        try:
+            resolved = source.resolve(strict=False)
+        except (OSError, RuntimeError):
+            return "SOURCE_CHANGED", source
+        return ("SOURCE_ESCAPE" if not _inside(resolved, repo) else "SOURCE_CHANGED"), source
+    if not stat.S_ISREG(info.st_mode) or not os.access(str(source), os.R_OK):
+        return "SOURCE_CHANGED", source
+    try:
+        resolved = source.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return "SOURCE_CHANGED", source
+    if not _inside(resolved, repo):
+        return "SOURCE_ESCAPE", source
+    try:
+        final_info = os.lstat(str(source))
+    except OSError:
+        return "SOURCE_CHANGED", source
+    if _stat_is_link_or_reparse(final_info) or not stat.S_ISREG(final_info.st_mode):
+        return "SOURCE_CHANGED", source
+    return None, resolved
+
+
+def _parent_structure(target, root):
+    parent = target.parent
+    try:
+        parent_info = os.lstat(str(parent))
+    except FileNotFoundError:
+        return "TARGET_PARENT_MISSING"
+    except PermissionError:
+        return "PERMISSION_DENIED"
+    except OSError:
+        return "TARGET_PARENT_CHANGED"
+    if not _inside(parent, root):
+        return "TARGET_ESCAPE"
+    current = parent
+    while True:
+        try:
+            current_info = os.lstat(str(current))
+        except FileNotFoundError:
+            return "TARGET_PARENT_MISSING"
+        except PermissionError:
+            return "PERMISSION_DENIED"
+        except OSError:
+            return "TARGET_PARENT_CHANGED"
+        if _stat_is_link_or_reparse(current_info):
+            try:
+                resolved = current.resolve(strict=True)
+            except FileNotFoundError:
+                return "TARGET_ESCAPE"
+            except PermissionError:
+                return "PERMISSION_DENIED"
+            except (OSError, RuntimeError):
+                return "TARGET_PARENT_CHANGED"
+            return "TARGET_ESCAPE" if not _inside(resolved, root) else "TARGET_PARENT_SYMLINK"
+        if current == root:
+            break
+        current = current.parent
+        if not _inside(current, root):
+            return "TARGET_ESCAPE"
+    if not stat.S_ISDIR(parent_info.st_mode):
+        return "TARGET_PARENT_NOT_DIRECTORY"
+    return None
+
+
+def _parent_permission(target):
+    return os.access(str(target.parent), os.W_OK | os.X_OK)
+
+
+def inspect_entry(entry: Entry, repo_root, roots):
+    repo = canonical_root(repo_root)
+    root = roots[entry.target_root]
+    target = _target_path(entry, roots)
+    source_hint = _source_path(entry, repo) if entry.owner == "vendor-managed" else None
+    if not root.exists() or not root.is_dir():
+        return _result(entry, "TARGET_ROOT_UNAVAILABLE", target, source_hint)
+    if _target_escape(target, root):
+        return _result(entry, "TARGET_ESCAPE", target, source_hint)
+    if entry.owner != "vendor-managed":
+        code = "PROTECTED_PRESENT" if _lexists(target) else "PROTECTED_MISSING"
+        return _result(entry, code, target)
+
+    source_code, source = _source_state(entry, repo)
+    source_hint = source
+    if source_code:
+        return _result(entry, source_code, target)
+    structure_code = _parent_structure(target, root)
+    if structure_code:
+        return _result(entry, structure_code, target, source_hint)
+    if _lexists(target):
+        if target.is_dir() and not target.is_symlink():
+            return _result(entry, "VENDOR_COLLISION_DIRECTORY", target, source)
+        if target.is_symlink():
+            try:
+                same = target.resolve(strict=True) == source.resolve(strict=True)
+            except (OSError, RuntimeError):
+                return _result(entry, "VENDOR_BROKEN_LINK", target, source)
+            return _result(entry, "VENDOR_OK" if same else "VENDOR_WRONG_LINK", target, source)
+        if target.is_file():
+            return _result(entry, "VENDOR_COLLISION_FILE", target, source)
+        return _result(entry, "VENDOR_COLLISION_OTHER", target, source)
+    if not _parent_permission(target):
+        return _result(entry, "PERMISSION_DENIED", target, source_hint)
+    return _result(entry, "VENDOR_MISSING", target, source_hint)
+
+
+def inspect(manifest: Manifest, repo_root, klipper_root, config_root):
     roots = {"klipper": canonical_root(klipper_root), "config": canonical_root(config_root)}
-    results = []
-    for entry in manifest.entries:
-        target = _target_path(entry, roots)
-        root = roots[entry.target_root]
-        source_hint = _source_path(entry, repo) if entry.owner == "vendor-managed" else None
-        if not root.exists() or not root.is_dir():
-            results.append(_result(entry, "TARGET_ROOT_UNAVAILABLE", target, source_hint))
-            continue
-        if _target_escape(target, root):
-            results.append(_result(entry, "TARGET_ESCAPE", target, source_hint))
-            continue
-        if not _target_permission(target):
-            results.append(_result(entry, "PERMISSION_DENIED", target, source_hint))
-            continue
-        if entry.owner == "vendor-managed":
-            source_code, source = _source_state(entry, repo)
-            if source_code:
-                results.append(_result(entry, source_code, target))
-                continue
-            if not target.exists() and not target.is_symlink():
-                results.append(_result(entry, "VENDOR_MISSING", target, source))
-            elif target.is_dir() and not target.is_symlink():
-                results.append(_result(entry, "VENDOR_COLLISION_DIRECTORY", target, source))
-            elif target.is_symlink():
-                try:
-                    same = target.resolve(strict=True) == source.resolve(strict=True)
-                except (OSError, RuntimeError):
-                    results.append(_result(entry, "VENDOR_BROKEN_LINK", target, source))
-                    continue
-                results.append(_result(entry, "VENDOR_OK" if same else "VENDOR_WRONG_LINK", target, source))
-            elif target.is_file():
-                results.append(_result(entry, "VENDOR_COLLISION_FILE", target, source))
-            else:
-                results.append(_result(entry, "VENDOR_COLLISION_OTHER", target, source))
-        else:
-            code = "PROTECTED_PRESENT" if target.exists() or target.is_symlink() else "PROTECTED_MISSING"
-            results.append(_result(entry, code, target))
-    return results
+    return [inspect_entry(entry, repo_root, roots) for entry in manifest.entries]
 
 
 def _result(entry, code, target, source=None):

@@ -19,6 +19,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
-      - run: python -B -c "from pathlib import Path; [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in [Path('ktc_manager/__init__.py'), Path('ktc_manager/__main__.py'), Path('ktc_manager/cli.py'), Path('ktc_manager/model.py'), Path('ktc_manager/inspector.py')]]"
+      - run: python -B -c "from pathlib import Path; [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in sorted(Path('ktc_manager').glob('*.py'))]"
       - run: python -B -m unittest discover -s tests -v
       - run: git diff --check
+      - run: python -B -c "import subprocess, sys; status = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=all'], capture_output=True, text=True, check=True).stdout; sys.exit('working tree is not clean: ' + status) if status else None"
