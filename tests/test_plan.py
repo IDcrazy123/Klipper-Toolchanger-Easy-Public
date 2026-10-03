@@ -81,8 +81,9 @@ class PlanTests(unittest.TestCase):
             (config / "target.py").write_bytes(b"target")
             parsed = __import__("ktc_manager.model", fromlist=["parse_manifest_data"]).parse_manifest_data(manifest)
             before = snapshot([repo, config, klipper])
-            actions = plan_actions(inspect(parsed, repo, klipper, config))
+            actions = plan_actions(inspect(parsed, repo, klipper, config, "vendor"))
             self.assertEqual(before, snapshot([repo, config, klipper]))
+            self.assertEqual(len(actions), 1)
             self.assertEqual(actions[0]["action"], "BLOCKED")
             self.assertEqual(actions[0]["content_relation"], "DIFFERENT")
 

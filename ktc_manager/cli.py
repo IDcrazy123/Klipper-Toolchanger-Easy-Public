@@ -24,6 +24,8 @@ def _parser():
         child.add_argument("--format", choices=("text", "json"), default="text")
         if name == "plan":
             child.add_argument("--dry-run", action="store_true")
+        if name in ("doctor", "plan"):
+            child.add_argument("--id", dest="ids", action="append")
         if name == "apply":
             child.add_argument("--id", dest="ids", action="append")
     return parser
@@ -71,13 +73,16 @@ def main(argv=None):
         return 64
     if args.command == "apply" and (args.ids is None or len(args.ids) != 1):
         return _usage_error(args, "apply requires exactly one --id")
+    if args.command in ("doctor", "plan") and args.ids is not None and len(args.ids) != 1:
+        return _usage_error(args, "%s accepts at most one --id" % args.command)
     try:
         manifest_path, repo, klipper, config = _defaults(args)
         manifest = load_manifest(manifest_path)
         if args.command == "apply":
             document, exit_code = apply_entry(manifest, args.ids[0], repo, klipper, config)
         else:
-            results = inspect(manifest, repo, klipper, config)
+            entry_id = args.ids[0] if args.command in ("doctor", "plan") and args.ids else None
+            results = inspect(manifest, repo, klipper, config, entry_id)
             document = output_document(args.command, manifest, results, args.command == "plan")
             exit_code = 10 if document["summary"]["blockers"] else 0
     except ManifestError as exc:

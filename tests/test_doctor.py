@@ -50,6 +50,49 @@ class DoctorTests(unittest.TestCase):
         self.assertFalse((self.config / "target.txt").exists())
         self.assertFalse((self.config / "new").exists())
 
+    def test_selected_entry_returns_one_fingerprinted_result_and_unknown_touches_no_roots(self):
+        target = self.config / "target.txt"
+        target.write_bytes(b"target")
+        manifest = one_entry()
+        result = inspect(manifest, self.repo, self.klipper, self.config, "one")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["code"], "VENDOR_COLLISION_FILE")
+        self.assertIn("source_sha256", result[0])
+        with patch("ktc_manager.inspector.canonical_root") as canonical:
+            unknown = inspect(manifest, self.root / "bad-repo", self.root / "bad-klipper",
+                              self.root / "bad-config", "ONE")
+        canonical.assert_not_called()
+        self.assertEqual(unknown, [{"id": "ONE", "owner": "", "code": "UNKNOWN_ID", "target": ""}])
+
+    def test_selected_root_isolation(self):
+        manifest = one_entry(target="tool/target.txt")
+        (self.repo / "source.txt").write_bytes(b"source")
+        (self.config / "tool").mkdir()
+        poison_klipper = self.root / "missing-klipper"
+        real_canonical_root = canonical_root
+        def config_guard(path):
+            if Path(path) == poison_klipper:
+                raise AssertionError("inactive Klipper root was canonicalized")
+            return real_canonical_root(path)
+        with patch("ktc_manager.inspector.canonical_root", side_effect=config_guard):
+            config_result = inspect(manifest, self.repo, poison_klipper,
+                                    self.config, "one")[0]
+        self.assertEqual(config_result["code"], "VENDOR_MISSING")
+        klipper_manifest = parse_manifest_data({"schema_version": 1, "profile": "test", "entries": [{
+            "id": "one", "owner": "vendor-managed", "source": "source.txt",
+            "target_root": "klipper", "target": "tool/target.txt", "delivery": "symlink"
+        }]})
+        (self.klipper / "tool").mkdir()
+        poison_config = self.root / "missing-config"
+        def klipper_guard(path):
+            if Path(path) == poison_config:
+                raise AssertionError("inactive config root was canonicalized")
+            return real_canonical_root(path)
+        with patch("ktc_manager.inspector.canonical_root", side_effect=klipper_guard):
+            klipper_result = inspect(klipper_manifest, self.repo, self.klipper,
+                                     poison_config, "one")[0]
+        self.assertEqual(klipper_result["code"], "VENDOR_MISSING")
+
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink unavailable")
     def test_correct_wrong_and_broken_links(self):
         target = self.config / "target.txt"
