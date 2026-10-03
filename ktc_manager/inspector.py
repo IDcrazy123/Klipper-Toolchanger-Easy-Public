@@ -326,7 +326,7 @@ def _collision_fingerprints(entry, repo, root, source, target):
 
 
 def inspect_entry(entry: Entry, repo_root, roots):
-    repo = canonical_root(repo_root)
+    repo = canonical_root(repo_root) if entry.owner == "vendor-managed" else None
     root = roots[entry.target_root]
     target = _target_path(entry, roots)
     source_hint = _source_path(entry, repo) if entry.owner == "vendor-managed" else None
@@ -362,10 +362,21 @@ def inspect_entry(entry: Entry, repo_root, roots):
     return _result(entry, "VENDOR_MISSING", target, source_hint)
 
 
-def inspect(manifest: Manifest, repo_root, klipper_root, config_root):
-    roots = {"klipper": canonical_root(klipper_root), "config": canonical_root(config_root)}
+def inspect(manifest: Manifest, repo_root, klipper_root, config_root, entry_id=None):
+    if entry_id is not None:
+        selected = [entry for entry in manifest.entries if entry.id == entry_id]
+        if not selected:
+            return [{"id": entry_id, "owner": "", "code": "UNKNOWN_ID", "target": ""}]
+    else:
+        selected = list(manifest.entries)
+    target_roots = {entry.target_root for entry in selected}
+    roots = {}
+    if "klipper" in target_roots:
+        roots["klipper"] = canonical_root(klipper_root)
+    if "config" in target_roots:
+        roots["config"] = canonical_root(config_root)
     results = []
-    for entry in manifest.entries:
+    for entry in selected:
         result = inspect_entry(entry, repo_root, roots)
         if result.get("code") == "VENDOR_COLLISION_FILE":
             repo = canonical_root(repo_root)

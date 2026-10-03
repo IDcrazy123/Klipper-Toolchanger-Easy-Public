@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import unittest
+from pathlib import Path
 
 from ktc_manager.cli import main
 from ktc_manager.cli import _text
@@ -70,3 +71,33 @@ class CliTests(unittest.TestCase):
             self.assertEqual(main(["doctor", "--format", "text", "--manifest", "missing.json"]), 65)
         self.assertEqual(out.getvalue(), "")
         self.assertTrue(err.getvalue().startswith("KTCM1 error"))
+
+    def test_optional_selector_unknown_and_duplicate_boundaries(self):
+        for command in ("doctor", "plan"):
+            base = [command] + (["--dry-run"] if command == "plan" else [])
+            for output_format in ("text", "json"):
+                manifest = str(Path(__file__).resolve().parents[1] / "manifests" / "ownership-v1.json")
+                stream = io.StringIO()
+                error = io.StringIO()
+                with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+                    code = main(base + ["--id", "missing", "--repo-root", "missing-repo",
+                                        "--manifest", manifest,
+                                        "--config-root", "missing-config", "--klipper-root", "missing-klipper",
+                                        "--format", output_format])
+                self.assertEqual(code, 10)
+                self.assertNotIn("usage:", stream.getvalue().lower() + error.getvalue().lower())
+                if output_format == "json":
+                    self.assertEqual(error.getvalue(), "")
+                    document = json.loads(stream.getvalue())
+                    key = "results" if command == "doctor" else "actions"
+                    self.assertEqual(document[key][0]["code"], "UNKNOWN_ID")
+                    self.assertEqual(document[key][0]["target"], "")
+                else:
+                    self.assertEqual(stream.getvalue().count("KTCM1 item"), 1)
+                    self.assertIn('"code":"UNKNOWN_ID"', stream.getvalue())
+                stream = io.StringIO()
+                error = io.StringIO()
+                with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+                    code = main(base + ["--id", "one", "--id", "one", "--format", output_format])
+                self.assertEqual(code, 64)
+                self.assertNotIn("usage:", stream.getvalue().lower() + error.getvalue().lower())
