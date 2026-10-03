@@ -76,6 +76,67 @@ class DoctorTests(unittest.TestCase):
         (self.config / "protected.txt").write_text("keep", encoding="utf-8")
         self.assertEqual(self.run_one(manifest)["code"], "PROTECTED_PRESENT")
 
+    def test_protected_root_unavailable(self):
+        manifest = one_entry("machine-state", "printer.cfg")
+        missing_root = self.root / "missing-config"
+        self.assertEqual(inspect(manifest, self.repo, self.klipper, missing_root)[0]["code"],
+                         "TARGET_ROOT_UNAVAILABLE")
+
+    @unittest.skipIf(os.name == "nt", "permission mode semantics differ on Windows")
+    def test_protected_unwritable_real_parent_is_still_present_or_missing(self):
+        if os.geteuid() == 0:
+            self.skipTest("effective root bypasses POSIX permission checks")
+        parent = self.config / "protected"
+        parent.mkdir()
+        (parent / "printer.cfg").write_text("keep", encoding="utf-8")
+        parent.chmod(0o500)
+        try:
+            missing = one_entry("user-managed", "protected/missing.cfg")
+            present = one_entry("user-managed", "protected/printer.cfg")
+            self.assertEqual(self.run_one(missing)["code"], "PROTECTED_MISSING")
+            self.assertEqual(self.run_one(present)["code"], "PROTECTED_PRESENT")
+        finally:
+            parent.chmod(0o700)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unavailable")
+    def test_existing_vendor_under_parent_symlink_is_blocked(self):
+        real_parent = self.config / "real"
+        real_parent.mkdir()
+        try:
+            (self.config / "link").symlink_to(real_parent, target_is_directory=True)
+            (real_parent / "target.txt").symlink_to(self.repo / "source.txt")
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("symlink unavailable: %s" % exc)
+        self.assertEqual(self.run_one(one_entry(target="link/target.txt"))["code"],
+                         "TARGET_PARENT_SYMLINK")
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlink unavailable")
+    def test_protected_parent_escape_is_blocked(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        try:
+            (self.config / "escape").symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("symlink unavailable: %s" % exc)
+        protected = one_entry("machine-state", "escape/printer.cfg")
+        self.assertEqual(self.run_one(protected)["code"], "TARGET_ESCAPE")
+
+    @unittest.skipIf(os.name == "nt", "permission mode semantics differ on Windows")
+    def test_correct_vendor_link_under_unwritable_real_parent_is_ok(self):
+        if os.geteuid() == 0:
+            self.skipTest("effective root bypasses POSIX permission checks")
+        parent = self.config / "vendor"
+        parent.mkdir()
+        try:
+            (parent / "target.txt").symlink_to(self.repo / "source.txt")
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("symlink unavailable: %s" % exc)
+        parent.chmod(0o500)
+        try:
+            self.assertEqual(self.run_one(one_entry(target="vendor/target.txt"))["code"], "VENDOR_OK")
+        finally:
+            parent.chmod(0o700)
+
     def test_source_missing_directory_and_symlink(self):
         (self.repo / "source.txt").unlink()
         self.assertEqual(self.run_one()["code"], "SOURCE_MISSING")

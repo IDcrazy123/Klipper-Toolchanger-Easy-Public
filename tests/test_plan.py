@@ -26,6 +26,8 @@ class PlanTests(unittest.TestCase):
                     source = repo.joinpath(*entry.source.split("/"))
                     source.parent.mkdir(parents=True, exist_ok=True)
                     source.write_text("source", encoding="utf-8")
+                    target_root = klipper if entry.target_root == "klipper" else config
+                    target_root.joinpath(*entry.target.split("/")).parent.mkdir(parents=True, exist_ok=True)
             paths = [repo, klipper, config]
             before = snapshot(paths)
             actions = plan_actions(inspect(manifest, repo, klipper, config))
@@ -39,6 +41,31 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(main(["plan"]), 64)
         self.assertEqual(main(["apply"]), 64)
 
+    def test_missing_vendor_parent_is_explicit_blocker(self):
+        manifest = {
+            "schema_version": 1, "profile": "test", "entries": [{
+                "id": "vendor", "owner": "vendor-managed", "source": "source.txt",
+                "target_root": "config", "target": "missing/target.py", "delivery": "symlink"
+            }]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, config, klipper = root / "repo", root / "config", root / "klipper"
+            repo.mkdir(); config.mkdir(); klipper.mkdir()
+            (repo / "source.txt").write_text("source", encoding="utf-8")
+            path = root / "manifest.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            stream = __import__("io").StringIO()
+            import contextlib
+            with contextlib.redirect_stdout(stream):
+                code = main(["plan", "--dry-run", "--format", "json", "--manifest", str(path),
+                             "--repo-root", str(repo), "--config-root", str(config),
+                             "--klipper-root", str(klipper)])
+            document = json.loads(stream.getvalue())
+            self.assertEqual(code, 10)
+            self.assertEqual(document["actions"][0]["action"], "BLOCKED")
+            self.assertEqual(document["actions"][0]["code"], "TARGET_PARENT_MISSING")
+
     def test_json_is_parseable_and_deterministic(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -48,6 +75,11 @@ class PlanTests(unittest.TestCase):
             config = root / "config"
             klipper.mkdir()
             config.mkdir()
+            manifest = load_manifest(MANIFEST)
+            for entry in manifest.entries:
+                if entry.owner == "vendor-managed":
+                    target_root = klipper if entry.target_root == "klipper" else config
+                    target_root.joinpath(*entry.target.split("/")).parent.mkdir(parents=True, exist_ok=True)
             import contextlib
             import io
             for out in (out1, out2):
