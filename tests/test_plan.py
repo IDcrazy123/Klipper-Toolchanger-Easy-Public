@@ -66,6 +66,26 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(document["actions"][0]["action"], "BLOCKED")
             self.assertEqual(document["actions"][0]["code"], "TARGET_PARENT_MISSING")
 
+    def test_collision_remains_blocked_with_fingerprints(self):
+        manifest = {
+            "schema_version": 1, "profile": "test", "entries": [{
+                "id": "vendor", "owner": "vendor-managed", "source": "source.txt",
+                "target_root": "config", "target": "target.py", "delivery": "symlink"
+            }]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, config, klipper = root / "repo", root / "config", root / "klipper"
+            repo.mkdir(); config.mkdir(); klipper.mkdir()
+            (repo / "source.txt").write_bytes(b"source")
+            (config / "target.py").write_bytes(b"target")
+            parsed = __import__("ktc_manager.model", fromlist=["parse_manifest_data"]).parse_manifest_data(manifest)
+            before = snapshot([repo, config, klipper])
+            actions = plan_actions(inspect(parsed, repo, klipper, config))
+            self.assertEqual(before, snapshot([repo, config, klipper]))
+            self.assertEqual(actions[0]["action"], "BLOCKED")
+            self.assertEqual(actions[0]["content_relation"], "DIFFERENT")
+
     def test_json_is_parseable_and_deterministic(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

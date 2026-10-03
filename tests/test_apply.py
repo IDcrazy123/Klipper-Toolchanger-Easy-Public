@@ -101,6 +101,23 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(document["result"], "BLOCKED")
             self.assertEqual(before, snapshot([self.root]))
 
+    def test_apply_collision_output_has_no_fingerprint_fields(self):
+        target = self.config / "tool/target.py"
+        target.write_bytes(b"target")
+        with patch("ktc_manager.inspector._collision_fingerprints") as fingerprints:
+            document, code = self.apply()
+        fingerprints.assert_not_called()
+        self.assertEqual((document["result"], code), ("BLOCKED", 10))
+        self.assertEqual(set(document), {"schema_version", "command", "profile", "dry_run",
+                                         "result", "summary", "actions"})
+        self.assertEqual(document["summary"], {"total": 1, "blockers": 1, "created": 0, "noop": 0})
+        action = document["actions"][0]
+        self.assertEqual(set(action), {"id", "owner", "code", "action", "target", "source"})
+        self.assertEqual(action["code"], "VENDOR_COLLISION_FILE")
+        self.assertNotIn("source_sha256", action)
+        self.assertNotIn("target_sha256", action)
+        self.assertNotIn("content_relation", action)
+
     def test_protected_unknown_and_repeated_id_are_blocked(self):
         protected = manifest("user-managed", ident="protected", target="tool/user.cfg")
         (self.config / "tool/user.cfg").write_text("keep", encoding="utf-8")
