@@ -28,7 +28,7 @@ def _is_link_or_reparse(path):
 
 
 def _stat_is_link_or_reparse(info):
-    return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
+    return stat.S_ISLNK(info.st_mode) or bool((getattr(info, "st_file_attributes", 0) or 0) & 0x400)
 
 
 def canonical_root(path):
@@ -167,6 +167,164 @@ def _parent_permission(target):
     return os.access(str(target.parent), os.W_OK | os.X_OK)
 
 
+def _file_state(info):
+    return (
+        info.st_dev,
+        info.st_ino,
+        stat.S_IFMT(info.st_mode),
+        bool((getattr(info, "st_file_attributes", 0) or 0) & 0x400),
+        info.st_size,
+        getattr(info, "st_mtime_ns", int(info.st_mtime * 1000000000)),
+        getattr(info, "st_ctime_ns", int(info.st_ctime * 1000000000)),
+    )
+
+
+def _ordinary_regular(info):
+    return stat.S_ISREG(info.st_mode) and not _stat_is_link_or_reparse(info)
+
+
+def _cross_handle_state(info):
+    return _file_state(info)[:-1]
+
+
+def _stream_file(path, role):
+    changed = "SOURCE_CHANGED" if role == "source" else "TARGET_CHANGED"
+    unreadable = "SOURCE_UNREADABLE" if role == "source" else "TARGET_UNREADABLE"
+    try:
+        initial_info = os.lstat(str(path))
+    except PermissionError:
+        return unreadable, None
+    except OSError:
+        return changed, None
+    if not _ordinary_regular(initial_info):
+        return changed, None
+    flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0) |
+             getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        fd = os.open(str(path), flags)
+    except FileNotFoundError:
+        return changed, None
+    except OSError:
+        return unreadable, None
+    raw = hashlib.sha256()
+    normalized = hashlib.sha256()
+    raw_size = 0
+    normalized_size = 0
+    pending_cr = False
+    try:
+        try:
+            opened_info = os.fstat(fd)
+        except OSError:
+            return unreadable, None
+        if (_cross_handle_state(opened_info) != _cross_handle_state(initial_info) or
+                not _ordinary_regular(opened_info)):
+            return changed, None
+        while True:
+            try:
+                chunk = os.read(fd, 1024 * 1024)
+            except OSError:
+                return unreadable, None
+            if not chunk:
+                break
+            raw.update(chunk)
+            raw_size += len(chunk)
+            normalized_chunk = bytearray()
+            for byte in chunk:
+                if pending_cr:
+                    if byte == 10:
+                        normalized_chunk.append(10)
+                        pending_cr = False
+                        continue
+                    normalized_chunk.append(13)
+                    pending_cr = False
+                if byte == 13:
+                    pending_cr = True
+                else:
+                    normalized_chunk.append(byte)
+            normalized.update(normalized_chunk)
+            normalized_size += len(normalized_chunk)
+        if pending_cr:
+            normalized.update(b"\r")
+            normalized_size += 1
+        try:
+            final_info = os.fstat(fd)
+        except OSError:
+            return unreadable, None
+        if (_file_state(final_info) != _file_state(opened_info) or
+                not _ordinary_regular(final_info)):
+            return changed, None
+    finally:
+        os.close(fd)
+    return None, {
+        "raw_sha256": raw.hexdigest(),
+        "raw_size": raw_size,
+        "normalized_sha256": normalized.hexdigest(),
+        "normalized_size": normalized_size,
+        "state": _file_state(initial_info),
+    }
+
+
+def _collision_fingerprints(entry, repo, root, source, target):
+    """Read-only fingerprints trust user-owned repo/source and target roots/parents.
+
+    This assumes no concurrent path updater while the checks and reads run; it does
+    not claim to eliminate TOCTOU risk against an actor mutating those trusted paths.
+    """
+    source_code, source_check = _source_state(entry, repo)
+    if source_code:
+        return source_code, None
+    source = source_check
+    structure_code = _parent_structure(target, root)
+    if structure_code:
+        return structure_code, None
+    source_code, source_fingerprint = _stream_file(source, "source")
+    if source_code:
+        return source_code, None
+    target_code, target_fingerprint = _stream_file(target, "target")
+    if target_code:
+        return target_code, None
+    try:
+        source_final = os.lstat(str(source))
+    except PermissionError:
+        return "SOURCE_UNREADABLE", None
+    except OSError:
+        return "SOURCE_CHANGED", None
+    if not _ordinary_regular(source_final):
+        return "SOURCE_CHANGED", None
+    try:
+        target_final = os.lstat(str(target))
+    except PermissionError:
+        return "TARGET_UNREADABLE", None
+    except OSError:
+        return "TARGET_CHANGED", None
+    if not _ordinary_regular(target_final):
+        return "TARGET_CHANGED", None
+    if _file_state(source_final) != source_fingerprint["state"]:
+        return "SOURCE_CHANGED", None
+    if _file_state(target_final) != target_fingerprint["state"]:
+        return "TARGET_CHANGED", None
+    source_code, source_check = _source_state(entry, repo)
+    if source_code:
+        return source_code, None
+    source = source_check
+    structure_code = _parent_structure(target, root)
+    if structure_code:
+        return structure_code, None
+    if (source_fingerprint["raw_size"] == target_fingerprint["raw_size"] and
+            source_fingerprint["raw_sha256"] == target_fingerprint["raw_sha256"]):
+        relation = "IDENTICAL_BYTES"
+    elif (source_fingerprint["normalized_size"] == target_fingerprint["normalized_size"] and
+          source_fingerprint["normalized_sha256"] == target_fingerprint["normalized_sha256"]):
+        relation = "EQUAL_AFTER_CRLF_NORMALIZATION"
+    else:
+        relation = "DIFFERENT"
+    return None, {
+        "source_sha256": source_fingerprint["raw_sha256"],
+        "target_sha256": target_fingerprint["raw_sha256"],
+        "content_relation": relation,
+    }
+
+
 def inspect_entry(entry: Entry, repo_root, roots):
     repo = canonical_root(repo_root)
     root = roots[entry.target_root]
@@ -206,7 +364,21 @@ def inspect_entry(entry: Entry, repo_root, roots):
 
 def inspect(manifest: Manifest, repo_root, klipper_root, config_root):
     roots = {"klipper": canonical_root(klipper_root), "config": canonical_root(config_root)}
-    return [inspect_entry(entry, repo_root, roots) for entry in manifest.entries]
+    results = []
+    for entry in manifest.entries:
+        result = inspect_entry(entry, repo_root, roots)
+        if result.get("code") == "VENDOR_COLLISION_FILE":
+            repo = canonical_root(repo_root)
+            root = roots[entry.target_root]
+            code, fingerprints = _collision_fingerprints(
+                entry, repo, root, Path(result["source"]), Path(result["target"]))
+            result = dict(result)
+            if code:
+                result["code"] = code
+            else:
+                result.update(fingerprints)
+        results.append(result)
+    return results
 
 
 def _result(entry, code, target, source=None):

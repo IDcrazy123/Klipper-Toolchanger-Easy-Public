@@ -1,9 +1,14 @@
+import hashlib
+import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
-from ktc_manager.inspector import inspect, snapshot
+from ktc_manager.inspector import (_collision_fingerprints, canonical_root, inspect, snapshot)
 from ktc_manager.model import parse_manifest_data
 
 
@@ -12,6 +17,13 @@ def one_entry(owner="vendor-managed", target="target.txt"):
     if owner == "vendor-managed":
         item.update(source="source.txt", delivery="symlink")
     return parse_manifest_data({"schema_version": 1, "profile": "test", "entries": [item]})
+
+
+def same_existing_path(path, expected):
+    try:
+        return os.path.samefile(str(path), str(expected))
+    except OSError:
+        return Path(path).resolve(strict=False) == Path(expected).resolve(strict=False)
 
 
 class DoctorTests(unittest.TestCase):
@@ -63,8 +75,187 @@ class DoctorTests(unittest.TestCase):
         target = self.config / "target.txt"
         target.write_text("source", encoding="utf-8")
         before = snapshot([target])
-        self.assertEqual(self.run_one()["code"], "VENDOR_COLLISION_FILE")
+        result = self.run_one()
+        self.assertEqual(result["code"], "VENDOR_COLLISION_FILE")
+        self.assertEqual(result["source_sha256"], hashlib.sha256(b"source").hexdigest())
+        self.assertEqual(result["target_sha256"], hashlib.sha256(b"source").hexdigest())
+        self.assertEqual(result["content_relation"], "IDENTICAL_BYTES")
         self.assertEqual(before, snapshot([target]))
+
+    def test_collision_content_relations_are_raw_and_crlf_exact(self):
+        target = self.config / "target.txt"
+        cases = ((b"same\x00", b"same\x00", "IDENTICAL_BYTES"),
+                 (b"line\r\nend", b"line\nend", "EQUAL_AFTER_CRLF_NORMALIZATION"),
+                 (b"line\rend", b"line\nend", "DIFFERENT"),
+                 (b"\xef\xbb\xbfline", b"line", "DIFFERENT"),
+                 (b"line ", b"line", "DIFFERENT"),
+                 (b"line\n", b"line", "DIFFERENT"))
+        for source, target_bytes, relation in cases:
+            (self.repo / "source.txt").write_bytes(source)
+            target.write_bytes(target_bytes)
+            result = self.run_one()
+            self.assertEqual(result["code"], "VENDOR_COLLISION_FILE")
+            self.assertEqual(result["content_relation"], relation)
+            self.assertEqual(result["source_sha256"], hashlib.sha256(source).hexdigest())
+            self.assertEqual(result["target_sha256"], hashlib.sha256(target_bytes).hexdigest())
+
+    def test_crlf_split_at_stream_chunk_boundary(self):
+        prefix = b"A" * (1024 * 1024 - 1)
+        source = prefix + b"\r\nB"
+        target = prefix + b"\nB"
+        (self.repo / "source.txt").write_bytes(source)
+        (self.config / "target.txt").write_bytes(target)
+        result = self.run_one()
+        self.assertEqual(result["content_relation"], "EQUAL_AFTER_CRLF_NORMALIZATION")
+        self.assertEqual(result["source_sha256"], hashlib.sha256(source).hexdigest())
+        self.assertEqual(result["target_sha256"], hashlib.sha256(target).hexdigest())
+
+    def test_protected_entries_are_not_fingerprinted(self):
+        manifest = one_entry("user-managed", "protected.txt")
+        (self.config / "protected.txt").write_bytes(b"protected")
+        with patch("ktc_manager.inspector._collision_fingerprints") as fingerprints:
+            result = self.run_one(manifest)
+        fingerprints.assert_not_called()
+        self.assertEqual(result["code"], "PROTECTED_PRESENT")
+        self.assertNotIn("source_sha256", result)
+        self.assertNotIn("target_sha256", result)
+        self.assertNotIn("content_relation", result)
+
+    def test_fingerprint_read_failure_and_source_change_fail_closed(self):
+        target = self.config / "target.txt"
+        target.write_bytes(b"target")
+        with patch("ktc_manager.inspector.os.open", side_effect=PermissionError("read denied")):
+            result = self.run_one()
+        self.assertEqual(result["code"], "SOURCE_UNREADABLE")
+        self.assertFalse(any(key in result for key in ("source_sha256", "target_sha256", "content_relation")))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo") and hasattr(os, "O_NONBLOCK"),
+                         "FIFO/nonblocking capability unavailable")
+    def test_fifo_swap_is_nonblocking_and_fail_closed(self):
+        target = self.config / "target.txt"
+        target.write_bytes(b"target")
+        fifo = self.root / "fingerprint.fifo"
+        os.mkfifo(str(fifo))
+        real_open = os.open
+        flags_seen = []
+        def open_fifo(path, flags):
+            flags_seen.append(flags)
+            return real_open(str(fifo), flags)
+        try:
+            with patch("ktc_manager.inspector.os.open", side_effect=open_fifo):
+                result = self.run_one()
+        finally:
+            fifo.unlink(missing_ok=True)
+        self.assertTrue(flags_seen[0] & os.O_NONBLOCK)
+        self.assertEqual(result["code"], "SOURCE_CHANGED")
+        self.assertFalse(any(key in result for key in ("source_sha256", "target_sha256", "content_relation")))
+
+    def test_containment_failures_are_blockers_without_fingerprints(self):
+        repo = canonical_root(self.repo)
+        config = canonical_root(self.config)
+        source = repo / "source.txt"
+        target = config / "target.txt"
+        target.write_bytes(b"target")
+        collision = {"code": "VENDOR_COLLISION_FILE", "source": str(source),
+                     "target": str(target), "id": "one", "owner": "vendor-managed"}
+        before = snapshot([self.root])
+        with patch("ktc_manager.inspector.inspect_entry", return_value=collision), \
+             patch("ktc_manager.inspector._source_state",
+                   return_value=("SOURCE_ESCAPE", source)):
+            result = inspect(one_entry(), self.repo, self.klipper, self.config)[0]
+        self.assertEqual(result["code"], "SOURCE_ESCAPE")
+        self.assertFalse(any(key in result for key in ("source_sha256", "target_sha256", "content_relation")))
+        self.assertEqual(before, snapshot([self.root]))
+
+        with patch("ktc_manager.inspector.inspect_entry", return_value=collision), \
+             patch("ktc_manager.inspector._source_state",
+                   side_effect=[(None, source), ("SOURCE_CHANGED", source)]), \
+             patch("ktc_manager.inspector._stream_file",
+                   return_value=(None, {"raw_sha256": "a", "normalized_sha256": "a", "state": ()})):
+            result = inspect(one_entry(), self.repo, self.klipper, self.config)[0]
+        self.assertEqual(result["code"], "SOURCE_CHANGED")
+        self.assertFalse(any(key in result for key in ("source_sha256", "target_sha256", "content_relation")))
+
+        with patch("ktc_manager.inspector.inspect_entry", return_value=collision), \
+             patch("ktc_manager.inspector._source_state",
+                   return_value=(None, source)), \
+             patch("ktc_manager.inspector._parent_structure",
+                   side_effect=[None, "TARGET_PARENT_CHANGED"]), \
+             patch("ktc_manager.inspector._file_state", return_value=()), \
+             patch("ktc_manager.inspector._stream_file",
+                   return_value=(None, {"raw_sha256": "a", "normalized_sha256": "a",
+                                       "raw_size": 1, "normalized_size": 1, "state": ()})):
+            result = inspect(one_entry(), self.repo, self.klipper, self.config)[0]
+        self.assertEqual(result["code"], "TARGET_PARENT_CHANGED")
+        self.assertFalse(any(key in result for key in ("source_sha256", "target_sha256", "content_relation")))
+
+    def test_fingerprint_read_failure_target_and_races_fail_closed(self):
+        target = self.config / "target.txt"
+        target.write_bytes(b"target")
+        real_open = os.open
+        def target_read_failure(path, flags):
+            if os.path.samefile(str(path), str(target)):
+                raise PermissionError("target read denied")
+            return real_open(path, flags)
+        with patch("ktc_manager.inspector.os.open", side_effect=target_read_failure):
+            result = self.run_one()
+        self.assertEqual(result["code"], "TARGET_UNREADABLE")
+        self.assertFalse(any(key in result for key in ("source_sha256", "target_sha256", "content_relation")))
+        real_lstat = os.lstat
+        source = canonical_root(self.repo) / "source.txt"
+        calls = []
+        def changing_lstat(path):
+            info = real_lstat(path)
+            if same_existing_path(path, source):
+                calls.append(1)
+                if len(calls) >= 3:
+                    values = list(info)
+                    values[6] += 1
+                    return os.stat_result(values)
+            return info
+        with patch("ktc_manager.inspector.os.lstat", side_effect=changing_lstat):
+            result = self.run_one()
+        self.assertEqual(result["code"], "SOURCE_CHANGED")
+        self.assertFalse(any(key in result for key in ("source_sha256", "target_sha256", "content_relation")))
+        target = canonical_root(self.config) / "target.txt"
+        target_calls = []
+        def changing_target_lstat(path):
+            info = real_lstat(path)
+            if same_existing_path(path, target):
+                target_calls.append(1)
+                if len(target_calls) >= 2:
+                    values = list(info)
+                    values[6] += 1
+                    return os.stat_result(values)
+            return info
+        with patch("ktc_manager.inspector.os.lstat", side_effect=changing_target_lstat):
+            result = self.run_one()
+        self.assertEqual(result["code"], "TARGET_CHANGED")
+        self.assertFalse(any(key in result for key in ("source_sha256", "target_sha256", "content_relation")))
+
+    def test_doctor_json_and_text_collision_are_deterministic(self):
+        (self.config / "target.txt").write_bytes(b"target")
+        manifest_path = self.root / "manifest.json"
+        manifest_path.write_text(json.dumps({
+            "schema_version": 1, "profile": "test", "entries": [{
+                "id": "one", "owner": "vendor-managed", "source": "source.txt",
+                "target_root": "config", "target": "target.txt", "delivery": "symlink"
+            }]
+        }), encoding="utf-8")
+        values = []
+        for output_format in ("json", "text"):
+            for _ in range(2):
+                stream = StringIO()
+                with redirect_stdout(stream):
+                    code = __import__("ktc_manager.cli", fromlist=["main"]).main(
+                        ["doctor", "--format", output_format, "--repo-root", str(self.repo),
+                         "--manifest", str(manifest_path),
+                         "--config-root", str(self.config), "--klipper-root", str(self.klipper)])
+                self.assertEqual(code, 10)
+                values.append(stream.getvalue())
+        self.assertEqual(values[0], values[1])
+        self.assertEqual(values[2], values[3])
+        self.assertNotIn("\x1b[", "".join(values))
 
     def test_directory_collision(self):
         (self.config / "target.txt").mkdir()
