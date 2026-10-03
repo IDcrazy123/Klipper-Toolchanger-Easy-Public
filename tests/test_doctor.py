@@ -8,7 +8,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from ktc_manager.inspector import (_collision_fingerprints, inspect, snapshot)
+from ktc_manager.inspector import (_collision_fingerprints, canonical_root, inspect, snapshot)
 from ktc_manager.model import parse_manifest_data
 
 
@@ -17,6 +17,13 @@ def one_entry(owner="vendor-managed", target="target.txt"):
     if owner == "vendor-managed":
         item.update(source="source.txt", delivery="symlink")
     return parse_manifest_data({"schema_version": 1, "profile": "test", "entries": [item]})
+
+
+def same_existing_path(path, expected):
+    try:
+        return os.path.samefile(str(path), str(expected))
+    except OSError:
+        return Path(path).resolve(strict=False) == Path(expected).resolve(strict=False)
 
 
 class DoctorTests(unittest.TestCase):
@@ -144,14 +151,17 @@ class DoctorTests(unittest.TestCase):
         self.assertFalse(any(key in result for key in ("source_sha256", "target_sha256", "content_relation")))
 
     def test_containment_failures_are_blockers_without_fingerprints(self):
-        target = self.config / "target.txt"
+        repo = canonical_root(self.repo)
+        config = canonical_root(self.config)
+        source = repo / "source.txt"
+        target = config / "target.txt"
         target.write_bytes(b"target")
-        collision = {"code": "VENDOR_COLLISION_FILE", "source": str(self.repo / "source.txt"),
+        collision = {"code": "VENDOR_COLLISION_FILE", "source": str(source),
                      "target": str(target), "id": "one", "owner": "vendor-managed"}
         before = snapshot([self.root])
         with patch("ktc_manager.inspector.inspect_entry", return_value=collision), \
              patch("ktc_manager.inspector._source_state",
-                   return_value=("SOURCE_ESCAPE", self.repo / "source.txt")):
+                   return_value=("SOURCE_ESCAPE", source)):
             result = inspect(one_entry(), self.repo, self.klipper, self.config)[0]
         self.assertEqual(result["code"], "SOURCE_ESCAPE")
         self.assertFalse(any(key in result for key in ("source_sha256", "target_sha256", "content_relation")))
@@ -159,8 +169,7 @@ class DoctorTests(unittest.TestCase):
 
         with patch("ktc_manager.inspector.inspect_entry", return_value=collision), \
              patch("ktc_manager.inspector._source_state",
-                   side_effect=[(None, self.repo / "source.txt"),
-                                ("SOURCE_CHANGED", self.repo / "source.txt")]), \
+                   side_effect=[(None, source), ("SOURCE_CHANGED", source)]), \
              patch("ktc_manager.inspector._stream_file",
                    return_value=(None, {"raw_sha256": "a", "normalized_sha256": "a", "state": ()})):
             result = inspect(one_entry(), self.repo, self.klipper, self.config)[0]
@@ -169,7 +178,7 @@ class DoctorTests(unittest.TestCase):
 
         with patch("ktc_manager.inspector.inspect_entry", return_value=collision), \
              patch("ktc_manager.inspector._source_state",
-                   return_value=(None, Path(collision["source"]))), \
+                   return_value=(None, source)), \
              patch("ktc_manager.inspector._parent_structure",
                    side_effect=[None, "TARGET_PARENT_CHANGED"]), \
              patch("ktc_manager.inspector._file_state", return_value=()), \
@@ -193,11 +202,11 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(result["code"], "TARGET_UNREADABLE")
         self.assertFalse(any(key in result for key in ("source_sha256", "target_sha256", "content_relation")))
         real_lstat = os.lstat
-        source = self.repo / "source.txt"
+        source = canonical_root(self.repo) / "source.txt"
         calls = []
         def changing_lstat(path):
             info = real_lstat(path)
-            if Path(path) == source:
+            if same_existing_path(path, source):
                 calls.append(1)
                 if len(calls) >= 3:
                     values = list(info)
@@ -208,11 +217,11 @@ class DoctorTests(unittest.TestCase):
             result = self.run_one()
         self.assertEqual(result["code"], "SOURCE_CHANGED")
         self.assertFalse(any(key in result for key in ("source_sha256", "target_sha256", "content_relation")))
-        target = self.config / "target.txt"
+        target = canonical_root(self.config) / "target.txt"
         target_calls = []
         def changing_target_lstat(path):
             info = real_lstat(path)
-            if Path(path) == target:
+            if same_existing_path(path, target):
                 target_calls.append(1)
                 if len(target_calls) >= 2:
                     values = list(info)
