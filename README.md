@@ -12,23 +12,22 @@ All of the documentation for StealthChanger still applies and should be what you
 ## Upgrading from the old Klipper Tool Changer Easy
 [Upgrade instructions](upgrade.md)
 
-# Installation
+# Manager inspection and safe single-entry apply
 
-To install this plugin, run the installation script using the following command over SSH. This script will download this GitHub repository to your RaspberryPi home directory, and symlink the files in the Klipper extra folder.  It will also create copies of the user editable configuration and populate some example tools.  
+Read the [KTC-Easy Manager Safety Guide](manager.md) before inspecting or changing an installation. The manager is not a complete installer: `doctor` and `plan` are read-only, while `apply` is limited to one missing vendor symlink whose existing parent is already present.
 
-This script does the following:
+# Legacy installation
+
+`install.sh` is a legacy installer outside the manager's guarantees. It uses force-link operations, creates directories, copies files, and restarts Klipper. It may alter an existing layout, so do not treat repeated runs as safe or idempotent. Review the manager guide first; regular-file collisions and old-layout migration are STOP / REVIEW REQUIRED and unsupported by the manager.
+
+The legacy script does the following:
+
 - symlinks the needed Python files into `klipper/klippy/extras`
 - symlinks the gcode macros to `~/printer_data/config/toolchanger/readonly-configs`
 - copies some example tools into `~/printer_data/config/toolchanger/tools`
 - copies user editible config into `~/printer_data/config/toolchanger`
 
-Running `install.sh` multiple times is a safe opearation, provided you follow the instructions below about configuration.
-```
-cd ~/
-git clone https://github.com/jwellman80/klipper-toolchanger-easy.git
-cd ~/klipper-toolchanger-easy
-./install.sh
-```
+Existing symlink installs can be inspected with the manager. A missing vendor entry may use the single-entry, create-only `apply` command only when its target parent already exists. Do not use doctor/plan fingerprints as authorization to run this legacy installer.
 
 Add the following to your `printer.cfg`
 ```
@@ -54,11 +53,7 @@ primary_branch: main
 
 ## Updates that add new files
 
-Note that if an update has new klipper files, they **will not** be automatically installed into Klipper.
-You will need to run the intall script manualy to add them:
-```commandline
-bash ~/klipper-toolchanger-easy/install.sh
-```
+New vendor entries introduced by an update are not installed automatically. Inspect one entry with `doctor --id ID` or `plan --dry-run --id ID`; only a `VENDOR_MISSING` item whose existing target parent is present may be linked with the single-entry `apply --id ID` command. Any other setup requires a separately reviewed procedure. Doctor/plan fingerprints are not authorization to run `install.sh`.
 
 # VERY BASIC CONFIGURATION
 At a minimum you will need to: 
