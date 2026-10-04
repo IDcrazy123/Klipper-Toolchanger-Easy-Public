@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "profile": "voron-5-tool-tap-per-tool",
+  "entries": [
+    {"id":"vendor-bed-thermal-adjust","owner":"vendor-managed","source":"klipper/extras/bed_thermal_adjust.py","target_root":"klipper","target":"klippy/extras/bed_thermal_adjust.py","delivery":"symlink"},
+    {"id":"vendor-manual-rail","owner":"vendor-managed","source":"klipper/extras/manual_rail.py","target_root":"klipper","target":"klippy/extras/manual_rail.py","delivery":"symlink"},
+    {"id":"vendor-multi-fan","owner":"vendor-managed","source":"klipper/extras/multi_fan.py","target_root":"klipper","target":"klippy/extras/multi_fan.py","delivery":"symlink"},
+    {"id":"vendor-rounded-path","owner":"vendor-managed","source":"klipper/extras/rounded_path.py","target_root":"klipper","target":"klippy/extras/rounded_path.py","delivery":"symlink"},
+    {"id":"vendor-tool","owner":"vendor-managed","source":"klipper/extras/tool.py","target_root":"klipper","target":"klippy/extras/tool.py","delivery":"symlink"},
+    {"id":"vendor-tool-probe","owner":"vendor-managed","source":"klipper/extras/tool_probe.py","target_root":"klipper","target":"klippy/extras/tool_probe.py","delivery":"symlink"},
+    {"id":"vendor-tool-probe-endstop","owner":"vendor-managed","source":"klipper/extras/tool_probe_endstop.py","target_root":"klipper","target":"klippy/extras/tool_probe_endstop.py","delivery":"symlink"},
+    {"id":"vendor-toolchanger","owner":"vendor-managed","source":"klipper/extras/toolchanger.py","target_root":"klipper","target":"klippy/extras/toolchanger.py","delivery":"symlink"},
+    {"id":"vendor-tools-calibrate","owner":"vendor-managed","source":"klipper/extras/tools_calibrate.py","target_root":"klipper","target":"klippy/extras/tools_calibrate.py","delivery":"symlink"},
+    {"id":"vendor-calibrate-offsets","owner":"vendor-managed","source":"examples/easy-additions/calibrate-offsets.cfg","target_root":"config","target":"toolchanger/readonly-configs/calibrate-offsets.cfg","delivery":"symlink"},
+    {"id":"vendor-crash-detection","owner":"vendor-managed","source":"examples/easy-additions/crash-detection.cfg","target_root":"config","target":"toolchanger/readonly-configs/crash-detection.cfg","delivery":"symlink"},
+    {"id":"vendor-homing","owner":"vendor-managed","source":"examples/easy-additions/homing.cfg","target_root":"config","target":"toolchanger/readonly-configs/homing.cfg","delivery":"symlink"},
+    {"id":"vendor-toolchanger-macros","owner":"vendor-managed","source":"examples/easy-additions/toolchanger-macros.cfg","target_root":"config","target":"toolchanger/readonly-configs/toolchanger-macros.cfg","delivery":"symlink"},
+    {"id":"vendor-toolchanger-config","owner":"vendor-managed","source":"examples/easy-additions/toolchanger.cfg","target_root":"config","target":"toolchanger/readonly-configs/toolchanger.cfg","delivery":"symlink"},
+    {"id":"vendor-toolchanger-include","owner":"vendor-managed","source":"examples/easy-additions/user-configs/toolchanger-include.cfg","target_root":"config","target":"toolchanger/readonly-configs/toolchanger-include.cfg","delivery":"symlink"},
+    {"id":"vendor-tool-detection","owner":"vendor-managed","source":"examples/easy-additions/tool_detection.cfg","target_root":"config","target":"toolchanger/readonly-configs/tool_detection.cfg","delivery":"symlink"},
+    {"id":"user-toolchanger-config","owner":"user-managed","target_root":"config","target":"toolchanger/toolchanger-config.cfg"},
+    {"id":"user-tool-t0","owner":"user-managed","target_root":"config","target":"toolchanger/tools/T0.cfg"},
+    {"id":"user-tool-t1","owner":"user-managed","target_root":"config","target":"toolchanger/tools/T1.cfg"},
+    {"id":"user-tool-t2","owner":"user-managed","target_root":"config","target":"toolchanger/tools/T2.cfg"},
+    {"id":"user-tool-t3","owner":"user-managed","target_root":"config","target":"toolchanger/tools/T3.cfg"},
+    {"id":"user-tool-t4","owner":"user-managed","target_root":"config","target":"toolchanger/tools/T4.cfg"},
+    {"id":"machine-printer-config","owner":"machine-state","target_root":"config","target":"printer.cfg"}
+  ]
+}

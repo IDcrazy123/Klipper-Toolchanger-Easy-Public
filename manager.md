@@ -19,6 +19,15 @@ python3 -B -m ktc_manager apply --id ID [--format text|json]
 
 The commands use the repository manifest and configured repository, Klipper, and printer-config roots. Use `--format json` for machine-readable output; text output uses the `KTCM1` protocol prefix. Output is deterministic and contains no ANSI formatting.
 
+## Optional TAP profile
+
+TAP users must opt in explicitly by passing `--manifest manifests/ownership-v1-tap-per-tool.json` to `doctor`, `plan`, or `apply`. This TAP profile is not the default. Before any `apply`, verify that the emitted document's `profile` is exactly `voron-5-tool-tap-per-tool`.
+
+The TAP profile is identical to the default `voron-5-tool-cartographer` profile except for exactly two differences:
+
+- `vendor-toolchanger-include` uses `examples/easy-additions/user-configs/toolchanger-include.cfg` instead of the Cartographer scanner include.
+- It adds the vendor-managed `vendor-tool-detection` symlink from `examples/easy-additions/tool_detection.cfg` to `toolchanger/readonly-configs/tool_detection.cfg`.
+
 ## State and action meanings
 
 | Inspection state | Doctor / plan meaning | Apply meaning |
