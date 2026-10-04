@@ -16,8 +16,9 @@ from ktc_manager.inspector import (_parent_structure, _source_state, canonical_r
 from ktc_manager.model import ManifestError, parse_manifest_data
 
 
-def manifest(owner="vendor-managed", source="source.txt", target="tool/target.py", ident="vendor"):
-    entry = {"id": ident, "owner": owner, "target_root": "config", "target": target}
+def manifest(owner="vendor-managed", source="source.txt", target="tool/target.py", ident="vendor",
+             target_root="config"):
+    entry = {"id": ident, "owner": owner, "target_root": target_root, "target": target}
     if owner == "vendor-managed":
         entry.update(source=source, delivery="symlink")
     return parse_manifest_data({"schema_version": 1, "profile": "apply-test", "entries": [entry]})
@@ -133,6 +134,88 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual((unknown["result"], code), ("BLOCKED", 10))
         mismatch, code = self.blocked_unchanged(self.manifest, "VENDOR")
         self.assertEqual((mismatch["result"], code), ("BLOCKED", 10))
+
+    def test_unknown_id_skips_all_apply_path_access(self):
+        before = snapshot([self.root])
+        with patch("ktc_manager.executor.canonical_root") as canonical, \
+             patch("ktc_manager.executor.inspect_entry") as inspect, \
+             patch("ktc_manager.executor.revalidate_source") as revalidate, \
+             patch("ktc_manager.executor.os.symlink") as symlink:
+            document, code = apply_entry(self.manifest, "unknown", self.repo,
+                                         self.klipper, self.config)
+        self.assertEqual((document["actions"][0]["code"], document["result"], code),
+                         ("UNKNOWN_ID", "BLOCKED", 10))
+        self.assertEqual(document["actions"][0]["owner"], "")
+        self.assertEqual(document["actions"][0]["target"], "")
+        self.assertEqual(document["actions"][0]["source"], "")
+        canonical.assert_not_called()
+        inspect.assert_not_called()
+        revalidate.assert_not_called()
+        symlink.assert_not_called()
+        self.assertEqual(before, snapshot([self.root]))
+
+    def test_protected_entries_skip_all_apply_path_access(self):
+        for owner, ident, target in (("user-managed", "user", "tool/user.cfg"),
+                                     ("machine-state", "machine", "tool/machine.cfg")):
+            current = manifest(owner, ident=ident, target=target)
+            before = snapshot([self.root])
+            with patch("ktc_manager.executor.canonical_root") as canonical, \
+                 patch("ktc_manager.executor.inspect_entry") as inspect, \
+                 patch("ktc_manager.executor.revalidate_source") as revalidate, \
+                 patch("ktc_manager.executor.os.symlink") as symlink:
+                document, code = apply_entry(current, ident, self.repo,
+                                             self.klipper, self.config)
+            self.assertEqual((document["actions"][0]["code"], document["result"], code),
+                             ("PROTECTED_ENTRY", "BLOCKED", 10))
+            canonical.assert_not_called()
+            inspect.assert_not_called()
+            revalidate.assert_not_called()
+            symlink.assert_not_called()
+            self.assertEqual(before, snapshot([self.root]))
+
+    def test_config_vendor_does_not_resolve_klipper_root(self):
+        real_canonical = canonical_root
+
+        def canonical(path):
+            if Path(path) == self.klipper:
+                raise AssertionError("inactive klipper root resolved")
+            return real_canonical(path)
+
+        inspected = {"code": "VENDOR_OK", "target": str(self.config / "tool/target.py"),
+                     "source": str(self.repo / "source.txt")}
+        with patch("ktc_manager.executor.canonical_root", side_effect=canonical) as resolver, \
+             patch("ktc_manager.executor.inspect_entry", return_value=inspected) as inspect, \
+             patch("ktc_manager.executor.os.symlink") as symlink:
+            document, code = self.apply()
+        self.assertEqual((document["result"], code), ("NOOP", 0))
+        self.assertEqual(resolver.call_count, 1)
+        self.assertEqual(Path(resolver.call_args.args[0]), self.config)
+        inspect.assert_called_once_with(self.manifest.entries[0], self.repo,
+                                        {"config": real_canonical(self.config)})
+        symlink.assert_not_called()
+
+    def test_klipper_vendor_does_not_resolve_config_root(self):
+        current = manifest(target_root="klipper")
+        real_canonical = canonical_root
+
+        def canonical(path):
+            if Path(path) == self.config:
+                raise AssertionError("inactive config root resolved")
+            return real_canonical(path)
+
+        inspected = {"code": "VENDOR_OK", "target": str(self.klipper / "tool/target.py"),
+                     "source": str(self.repo / "source.txt")}
+        with patch("ktc_manager.executor.canonical_root", side_effect=canonical) as resolver, \
+             patch("ktc_manager.executor.inspect_entry", return_value=inspected) as inspect, \
+             patch("ktc_manager.executor.os.symlink") as symlink:
+            document, code = apply_entry(current, "vendor", self.repo,
+                                         self.klipper, self.config)
+        self.assertEqual((document["result"], code), ("NOOP", 0))
+        self.assertEqual(resolver.call_count, 1)
+        self.assertEqual(Path(resolver.call_args.args[0]), self.klipper)
+        inspect.assert_called_once_with(current.entries[0], self.repo,
+                                        {"klipper": real_canonical(self.klipper)})
+        symlink.assert_not_called()
 
     def test_parent_blockers(self):
         missing = manifest(target="missing/target.py")

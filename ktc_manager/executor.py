@@ -30,10 +30,6 @@ def _document(item, result):
     }
 
 
-def _roots(klipper_root, config_root):
-    return {"klipper": canonical_root(klipper_root), "config": canonical_root(config_root)}
-
-
 def _errno_value(exc):
     value = getattr(exc, "errno", None)
     return value if isinstance(value, int) else None
@@ -72,7 +68,6 @@ def _post_apply(entry, repo_root, roots, preflight, syscall_error=None):
 
 def apply_entry(manifest, entry_id, repo_root, klipper_root, config_root):
     matches = [entry for entry in manifest.entries if entry.id == entry_id]
-    roots = _roots(klipper_root, config_root)
     if not matches:
         item = _item(entry_id, "", "UNKNOWN_ID", "BLOCKED")
         return _document(item, manifest.profile), 10
@@ -80,6 +75,9 @@ def apply_entry(manifest, entry_id, repo_root, klipper_root, config_root):
     if entry.owner != "vendor-managed" or entry.delivery != "symlink":
         item = _item(entry.id, entry.owner, "PROTECTED_ENTRY", "BLOCKED", "", "")
         return _document(item, manifest.profile), 10
+
+    target_root = klipper_root if entry.target_root == "klipper" else config_root
+    roots = {entry.target_root: canonical_root(target_root)}
 
     inspected = inspect_entry(entry, repo_root, roots)
     if inspected["code"] == "VENDOR_OK":
