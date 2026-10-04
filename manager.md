@@ -10,20 +10,22 @@ The KTC-Easy manager is a state inspector with one narrowly scoped create-only o
 ## Commands
 
 ```text
-python3 -B -m ktc_manager doctor [--id ID] [--format text|json]
-python3 -B -m ktc_manager plan --dry-run [--id ID] [--format text|json]
-python3 -B -m ktc_manager apply --id ID --expect-profile PROFILE [--format text|json]
+python3 -B -m ktc_manager doctor [--profile ALIAS] [--id ID] [--format text|json]
+python3 -B -m ktc_manager plan --dry-run [--profile ALIAS] [--id ID] [--format text|json]
+python3 -B -m ktc_manager apply [--profile ALIAS] --id ID --expect-profile PROFILE [--format text|json]
 ```
 
 `ID` matching is exact and case-sensitive. Without `--id`, `doctor` and `plan` retain their all-entry behavior. A selected command returns exactly one item/action. Repeating `--id` is a usage error. `plan` always requires `--dry-run`; `apply` requires exactly one ID.
 
-`apply` also requires exactly one `--expect-profile PROFILE`. Obtain the exact profile string from an earlier `doctor` or `plan` result, then reuse that same value with the same `--manifest` path. The comparison is an exact, case-sensitive identity-string guard; it does not bind the manifest bytes or a filesystem snapshot, and it is not a plan token or TOCTOU protection. A mismatch returns exit 65 before apply execution.
+`apply` also requires exactly one `--expect-profile PROFILE`. Obtain the exact profile string from an earlier `doctor` or `plan` result, then reuse that same value with the same manifest selector (`--profile` alias or `--manifest` path). The comparison is an exact, case-sensitive identity-string guard; it does not bind the manifest bytes or a filesystem snapshot, and it is not a plan token or TOCTOU protection. A mismatch returns exit 65 before apply execution.
+
+The optional `--profile` aliases select built-in manifests relative to `--repo-root`: `cartographer` selects `manifests/ownership-v1.json` and profile `voron-5-tool-cartographer`; `tap-per-tool` selects `manifests/ownership-v1-tap-per-tool.json` and profile `voron-5-tool-tap-per-tool`. With no alias, the default remains the Cartographer manifest. `--profile` and an explicit `--manifest` are mutually exclusive; a custom manifest continues to work when `--profile` is omitted. Aliases do not detect or validate hardware.
 
 The commands use the repository manifest and configured repository, Klipper, and printer-config roots. Use `--format json` for machine-readable output; text output uses the `KTCM1` protocol prefix. Output is deterministic and contains no ANSI formatting.
 
 ## Optional TAP profile
 
-TAP users must opt in explicitly by passing `--manifest manifests/ownership-v1-tap-per-tool.json` to `doctor`, `plan`, or `apply`. This TAP profile is not the default. Before any `apply`, verify that the emitted document's `profile` is exactly `voron-5-tool-tap-per-tool`.
+TAP users must opt in explicitly with `--profile tap-per-tool` or by passing `--manifest manifests/ownership-v1-tap-per-tool.json` to `doctor`, `plan`, or `apply`. This TAP profile is not the default. Before any `apply`, verify that the emitted document's `profile` is exactly `voron-5-tool-tap-per-tool` and pass that exact value as `--expect-profile`.
 
 The TAP profile is identical to the default `voron-5-tool-cartographer` profile except for exactly two differences:
 

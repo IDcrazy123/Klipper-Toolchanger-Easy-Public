@@ -10,6 +10,11 @@ from .model import ManifestError, load_manifest
 
 
 HELP = "Read-only doctor, dry-run plan, and create-only single-entry apply for KTC-Easy."
+DEFAULT_MANIFEST = "manifests/ownership-v1.json"
+PROFILE_ALIASES = {
+    "cartographer": ("manifests/ownership-v1.json", "voron-5-tool-cartographer"),
+    "tap-per-tool": ("manifests/ownership-v1-tap-per-tool.json", "voron-5-tool-tap-per-tool"),
+}
 
 
 def _parser():
@@ -17,7 +22,8 @@ def _parser():
     sub = parser.add_subparsers(dest="command")
     for name in ("doctor", "plan", "apply"):
         child = sub.add_parser(name)
-        child.add_argument("--manifest", default="manifests/ownership-v1.json")
+        child.add_argument("--manifest", default=None)
+        child.add_argument("--profile", dest="profiles", action="append")
         child.add_argument("--repo-root", default=None)
         child.add_argument("--klipper-root", default=None)
         child.add_argument("--config-root", default=None)
@@ -37,7 +43,10 @@ def _defaults(args):
     repo = Path(args.repo_root).expanduser() if args.repo_root else package_root
     klipper = Path(args.klipper_root).expanduser() if args.klipper_root else Path(os.environ.get("KLIPPER_PATH", "~/klipper")).expanduser()
     config = Path(args.config_root).expanduser() if args.config_root else Path(os.environ.get("CONFIG_PATH", "~/printer_data/config")).expanduser()
-    manifest = Path(args.manifest).expanduser()
+    manifest_name = args.manifest if args.manifest is not None else DEFAULT_MANIFEST
+    if args.profiles:
+        manifest_name = PROFILE_ALIASES[args.profiles[0]][0]
+    manifest = Path(manifest_name).expanduser()
     if not manifest.is_absolute():
         manifest = repo / manifest
     return manifest, repo, klipper, config
@@ -64,6 +73,14 @@ def _usage_error(args, message):
     return 64
 
 
+def _profile_error(args, message):
+    if getattr(args, "format", "text") == "json":
+        print(json.dumps({"schema_version": 1, "error": message}, sort_keys=True))
+    else:
+        print("KTCM1 error %s" % message, file=sys.stderr)
+    return 65
+
+
 def main(argv=None):
     parser = _parser()
     try:
@@ -78,9 +95,20 @@ def main(argv=None):
         return _usage_error(args, "apply requires exactly one --expect-profile")
     if args.command in ("doctor", "plan") and args.ids is not None and len(args.ids) != 1:
         return _usage_error(args, "%s accepts at most one --id" % args.command)
+    if args.command in ("doctor", "plan", "apply"):
+        if args.profiles is not None and len(args.profiles) > 1:
+            return _usage_error(args, "%s accepts at most one --profile" % args.command)
+        if args.profiles and args.manifest is not None:
+            return _usage_error(args, "--profile and --manifest are mutually exclusive")
+        if args.profiles and args.profiles[0] not in PROFILE_ALIASES:
+            return _usage_error(args, "unknown --profile alias")
     try:
         manifest_path, repo, klipper, config = _defaults(args)
         manifest = load_manifest(manifest_path)
+        if args.profiles:
+            expected_profile = PROFILE_ALIASES[args.profiles[0]][1]
+            if manifest.profile != expected_profile:
+                return _profile_error(args, "manifest profile does not match --profile")
         if args.command == "apply":
             if args.expected_profiles[0] != manifest.profile:
                 if args.format == "json":
