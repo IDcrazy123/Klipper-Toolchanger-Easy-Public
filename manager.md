@@ -12,10 +12,12 @@ The KTC-Easy manager is a state inspector with one narrowly scoped create-only o
 ```text
 python3 -B -m ktc_manager doctor [--id ID] [--format text|json]
 python3 -B -m ktc_manager plan --dry-run [--id ID] [--format text|json]
-python3 -B -m ktc_manager apply --id ID [--format text|json]
+python3 -B -m ktc_manager apply --id ID --expect-profile PROFILE [--format text|json]
 ```
 
 `ID` matching is exact and case-sensitive. Without `--id`, `doctor` and `plan` retain their all-entry behavior. A selected command returns exactly one item/action. Repeating `--id` is a usage error. `plan` always requires `--dry-run`; `apply` requires exactly one ID.
+
+`apply` also requires exactly one `--expect-profile PROFILE`. Obtain the exact profile string from an earlier `doctor` or `plan` result, then reuse that same value with the same `--manifest` path. The comparison is an exact, case-sensitive identity-string guard; it does not bind the manifest bytes or a filesystem snapshot, and it is not a plan token or TOCTOU protection. A mismatch returns exit 65 before apply execution.
 
 The commands use the repository manifest and configured repository, Klipper, and printer-config roots. Use `--format json` for machine-readable output; text output uses the `KTCM1` protocol prefix. Output is deterministic and contains no ANSI formatting.
 
@@ -49,7 +51,7 @@ Doctor and plan collision results may include raw-byte SHA-256 values for source
 - `10`: domain or filesystem blocker, including an unknown ID.
 - `20`: apply failed or became indeterminate after an attempted syscall.
 - `64`: CLI usage, selector cardinality, or missing `plan --dry-run`.
-- `65`: invalid or unreadable manifest.
+- `65`: invalid or unreadable manifest, or `--expect-profile` mismatch.
 - `70`: unexpected internal error.
 
 ## Safety boundaries
