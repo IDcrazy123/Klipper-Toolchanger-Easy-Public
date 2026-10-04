@@ -15,6 +15,10 @@ from ktc_manager.inspector import (_parent_structure, _source_state, canonical_r
                                    inspect_entry, revalidate_source, snapshot)
 from ktc_manager.model import ManifestError, parse_manifest_data
 
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_MANIFEST = ROOT / "manifests" / "ownership-v1.json"
+TAP_MANIFEST = ROOT / "manifests" / "ownership-v1-tap-per-tool.json"
+
 
 def manifest(owner="vendor-managed", source="source.txt", target="tool/target.py", ident="vendor",
              target_root="config"):
@@ -420,6 +424,37 @@ class ApplyTests(unittest.TestCase):
                     self.assertEqual(document["schema_version"], 1)
                     self.assertIn("exactly one --id", document["error"])
 
+    def test_apply_expect_profile_cardinality_errors_are_deterministic(self):
+        for output_format in ("text", "json"):
+            for args in ((),
+                         ("--expect-profile", "one", "--expect-profile", "two")):
+                stream = io.StringIO()
+                error = io.StringIO()
+                with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+                    self.assertEqual(main(["apply", "--id", "vendor"] + list(args) +
+                                      ["--format", output_format]), 64)
+                self.assertNotIn("usage:", stream.getvalue().lower() + error.getvalue().lower())
+                self.assertNotIn("\x1b[", stream.getvalue() + error.getvalue())
+                if output_format == "text":
+                    self.assertEqual(stream.getvalue(), "")
+                    self.assertEqual(error.getvalue(),
+                                     "KTCM1 error apply requires exactly one --expect-profile\n")
+                else:
+                    self.assertEqual(error.getvalue(), "")
+                    self.assertEqual(json.loads(stream.getvalue()), {
+                        "schema_version": 1,
+                        "error": "apply requires exactly one --expect-profile",
+                    })
+
+    def test_apply_id_cardinality_precedes_profile_cardinality(self):
+        stream = io.StringIO()
+        error = io.StringIO()
+        with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+            code = main(["apply", "--expect-profile", "apply-test", "--format", "text"])
+        self.assertEqual(code, 64)
+        self.assertEqual(error.getvalue(), "KTCM1 error apply requires exactly one --id\n")
+        self.assertEqual(stream.getvalue(), "")
+
     def test_applied_and_noop_result_shapes_are_portable(self):
         missing = {"code": "VENDOR_MISSING", "target": str(self.config / "tool/target.py"),
                    "source": str(self.repo / "source.txt")}
@@ -464,7 +499,8 @@ class ApplyTests(unittest.TestCase):
         for output_format in ("json", "text"):
             args = ["apply", "--id", "unknown", "--manifest", str(manifest_path),
                     "--repo-root", str(self.repo), "--config-root", str(self.config),
-                    "--klipper-root", str(self.klipper), "--format", output_format]
+                    "--klipper-root", str(self.klipper), "--expect-profile", "apply-test",
+                    "--format", output_format]
             outputs = []
             for _ in range(2):
                 stream = io.StringIO()
@@ -478,7 +514,7 @@ class ApplyTests(unittest.TestCase):
 
     def test_cli_apply_error_exit_boundaries(self):
         self.assertEqual(main(["apply", "--id", "vendor", "--manifest", str(self.root / "missing.json"),
-                               "--format", "json"]), 65)
+                               "--expect-profile", "apply-test", "--format", "json"]), 65)
         manifest_path = self.root / "valid.json"
         manifest_path.write_text(json.dumps({
             "schema_version": 1, "profile": "apply-test", "entries": [
@@ -489,4 +525,127 @@ class ApplyTests(unittest.TestCase):
         with patch("ktc_manager.cli.apply_entry", side_effect=RuntimeError("internal")):
             self.assertEqual(main(["apply", "--id", "vendor", "--manifest", str(manifest_path),
                                    "--repo-root", str(self.repo), "--config-root", str(self.config),
-                                   "--klipper-root", str(self.klipper), "--format", "json"]), 70)
+                                   "--klipper-root", str(self.klipper), "--expect-profile", "apply-test",
+                                   "--format", "json"]), 70)
+
+    def test_apply_profile_mismatch_blocks_before_executor_and_roots(self):
+        cases = ((DEFAULT_MANIFEST, "voron-5-tool-tap-per-tool", "voron-5-tool-cartographer"),
+                 (TAP_MANIFEST, "voron-5-tool-cartographer", "voron-5-tool-tap-per-tool"))
+        for manifest_path, expected, actual in cases:
+            for output_format in ("text", "json"):
+                stream = io.StringIO()
+                error = io.StringIO()
+                with patch("ktc_manager.cli.apply_entry") as apply, \
+                     patch("ktc_manager.executor.canonical_root") as executor_root, \
+                     patch("ktc_manager.inspector.canonical_root") as inspector_root, \
+                     contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+                    code = main(["apply", "--id", "missing", "--manifest", str(manifest_path),
+                                 "--repo-root", str(ROOT), "--klipper-root", str(self.klipper),
+                                 "--config-root", str(self.config), "--expect-profile", expected,
+                                 "--format", output_format])
+                self.assertEqual(code, 65)
+                self.assertNotIn(actual, stream.getvalue() + error.getvalue())
+                self.assertNotIn(expected, stream.getvalue() + error.getvalue())
+                apply.assert_not_called()
+                executor_root.assert_not_called()
+                inspector_root.assert_not_called()
+                if output_format == "json":
+                    self.assertEqual(json.loads(stream.getvalue())["error"],
+                                     "manifest profile does not match --expect-profile")
+                    self.assertEqual(error.getvalue(), "")
+                else:
+                    self.assertEqual(stream.getvalue(), "")
+                    self.assertEqual(error.getvalue(),
+                                     "KTCM1 error manifest profile does not match --expect-profile\n")
+
+    def test_apply_profile_guard_is_case_sensitive(self):
+        stream = io.StringIO()
+        error = io.StringIO()
+        with patch("ktc_manager.cli.apply_entry") as apply, \
+             patch("ktc_manager.executor.canonical_root") as executor_root, \
+             patch("ktc_manager.inspector.canonical_root") as inspector_root, \
+             contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+            code = main(["apply", "--id", "missing", "--manifest", str(DEFAULT_MANIFEST),
+                         "--repo-root", str(ROOT), "--klipper-root", str(self.klipper),
+                         "--config-root", str(self.config),
+                         "--expect-profile", "VORON-5-TOOL-CARTOGRAPHER", "--format", "json"])
+        self.assertEqual(code, 65)
+        self.assertEqual(json.loads(stream.getvalue())["error"],
+                         "manifest profile does not match --expect-profile")
+        apply.assert_not_called()
+        executor_root.assert_not_called()
+        inspector_root.assert_not_called()
+        self.assertEqual(error.getvalue(), "")
+
+    def test_tap_expected_without_manifest_blocks_default_cartographer(self):
+        stream = io.StringIO()
+        error = io.StringIO()
+        with patch("ktc_manager.cli.apply_entry") as apply, \
+             patch("ktc_manager.executor.canonical_root") as executor_root, \
+             patch("ktc_manager.inspector.canonical_root") as inspector_root, \
+             contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+            code = main(["apply", "--id", "missing", "--repo-root", str(ROOT),
+                         "--klipper-root", str(self.klipper), "--config-root", str(self.config),
+                         "--expect-profile", "voron-5-tool-tap-per-tool", "--format", "json"])
+        self.assertEqual(code, 65)
+        self.assertEqual(json.loads(stream.getvalue()), {
+            "schema_version": 1,
+            "error": "manifest profile does not match --expect-profile",
+        })
+        self.assertEqual(error.getvalue(), "")
+        apply.assert_not_called()
+        executor_root.assert_not_called()
+        inspector_root.assert_not_called()
+
+    def test_invalid_manifest_json_and_schema_still_return_65_with_profile_flag(self):
+        for contents in ("{not-json", json.dumps({"schema_version": 999, "profile": "bad",
+                                                    "entries": []})):
+            manifest_path = self.root / "invalid.json"
+            manifest_path.write_text(contents, encoding="utf-8")
+            stream = io.StringIO()
+            error = io.StringIO()
+            with patch("ktc_manager.cli.apply_entry") as apply, \
+                 contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+                code = main(["apply", "--id", "missing", "--manifest", str(manifest_path),
+                             "--repo-root", str(self.repo), "--klipper-root", str(self.klipper),
+                             "--config-root", str(self.config), "--expect-profile", "apply-test",
+                             "--format", "json"])
+            self.assertEqual(code, 65)
+            self.assertIn("error", json.loads(stream.getvalue()))
+            self.assertEqual(error.getvalue(), "")
+            apply.assert_not_called()
+
+    def test_apply_matching_profiles_reach_executor_for_both_profiles(self):
+        cases = ((DEFAULT_MANIFEST, "voron-5-tool-cartographer"),
+                 (TAP_MANIFEST, "voron-5-tool-tap-per-tool"))
+        for manifest_path, profile in cases:
+            document = {"schema_version": 1, "command": "apply", "profile": profile,
+                        "dry_run": False, "result": "NOOP", "actions": [],
+                        "summary": {"total": 0, "blockers": 0}}
+            stream = io.StringIO()
+            with patch("ktc_manager.cli.apply_entry", return_value=(document, 0)) as apply, \
+                 contextlib.redirect_stdout(stream):
+                code = main(["apply", "--id", "missing", "--manifest", str(manifest_path),
+                             "--repo-root", str(ROOT), "--klipper-root", str(self.klipper),
+                             "--config-root", str(self.config), "--expect-profile", profile,
+                             "--format", "json"])
+            self.assertEqual(code, 0)
+            self.assertEqual(apply.call_args.args[0].profile, profile)
+            output = json.loads(stream.getvalue())
+            self.assertEqual(output["schema_version"], 1)
+            self.assertEqual(output["command"], "apply")
+            self.assertEqual(output["profile"], profile)
+            self.assertEqual(output["result"], "NOOP")
+            self.assertEqual(output["actions"], [])
+            self.assertEqual(output["summary"], {"total": 0, "blockers": 0})
+
+    def test_matching_profile_unknown_id_keeps_existing_exit(self):
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            code = main(["apply", "--id", "definitely-unknown", "--manifest", str(DEFAULT_MANIFEST),
+                         "--repo-root", str(ROOT), "--klipper-root", str(self.klipper),
+                         "--config-root", str(self.config),
+                         "--expect-profile", "voron-5-tool-cartographer", "--format", "json"])
+        self.assertEqual(code, 10)
+        document = json.loads(stream.getvalue())
+        self.assertEqual(document["actions"][0]["code"], "UNKNOWN_ID")
