@@ -1,13 +1,18 @@
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
+from ktc_manager.cli import main
+from ktc_manager.inspector import snapshot
 from ktc_manager.model import ManifestError, load_manifest, parse_manifest_data
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "manifests" / "ownership-v1.json"
+TAP_MANIFEST = ROOT / "manifests" / "ownership-v1-tap-per-tool.json"
 
 
 class ManifestTests(unittest.TestCase):
@@ -141,3 +146,72 @@ class ManifestTests(unittest.TestCase):
             path = Path(directory) / "m.json"
             path.write_text(json.dumps(self.data), encoding="utf-8")
             self.assertEqual(len(load_manifest(path).entries), 22)
+
+    def test_tap_profile_counts_mapping_and_exact_delta(self):
+        cartographer = load_manifest(MANIFEST)
+        tap = load_manifest(TAP_MANIFEST)
+        self.assertEqual(tap.profile, "voron-5-tool-tap-per-tool")
+        self.assertEqual(len(tap.entries), 23)
+        self.assertEqual(sum(e.owner == "vendor-managed" for e in tap.entries), 16)
+        self.assertEqual(sum(e.owner == "user-managed" for e in tap.entries), 6)
+        self.assertEqual(sum(e.owner == "machine-state" for e in tap.entries), 1)
+
+        def values(manifest):
+            return {entry.id: (entry.owner, entry.source, entry.target_root,
+                               entry.target, entry.delivery) for entry in manifest.entries}
+
+        cart = values(cartographer)
+        tap_values = values(tap)
+        self.assertEqual(set(tap_values) - set(cart), {"vendor-tool-detection"})
+        self.assertEqual(set(cart) - set(tap_values), set())
+        changed = {ident for ident in cart if cart[ident] != tap_values[ident]}
+        self.assertEqual(changed, {"vendor-toolchanger-include"})
+        self.assertEqual(tap_values["vendor-toolchanger-include"], (
+            "vendor-managed",
+            "examples/easy-additions/user-configs/toolchanger-include.cfg",
+            "config",
+            "toolchanger/readonly-configs/toolchanger-include.cfg",
+            "symlink",
+        ))
+        self.assertEqual(tap_values["vendor-tool-detection"], (
+            "vendor-managed",
+            "examples/easy-additions/tool_detection.cfg",
+            "config",
+            "toolchanger/readonly-configs/tool_detection.cfg",
+            "symlink",
+        ))
+        protected = lambda manifest: {(e.owner, e.target_root, e.target)
+                                      for e in manifest.entries if e.owner != "vendor-managed"}
+        self.assertEqual(protected(cartographer), protected(tap))
+
+    def test_all_tap_and_cartographer_vendor_sources_are_regular_files(self):
+        for path in (MANIFEST, TAP_MANIFEST):
+            for entry in load_manifest(path).entries:
+                if entry.owner != "vendor-managed":
+                    continue
+                source = ROOT.joinpath(*entry.source.split("/"))
+                self.assertTrue(source.is_file(), source)
+                self.assertFalse(source.is_symlink(), source)
+
+    def test_tap_doctor_and_plan_are_read_only_and_report_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            klipper = root / "klipper"
+            config = root / "config"
+            for path in (repo, klipper, config):
+                path.mkdir()
+            before = snapshot([root])
+            common = ["--manifest", str(TAP_MANIFEST), "--repo-root", str(ROOT),
+                      "--klipper-root", str(klipper), "--config-root", str(config),
+                      "--format", "json"]
+            for command in (("doctor",), ("plan", "--dry-run")):
+                stream = StringIO()
+                with redirect_stdout(stream):
+                    code = main(list(command) + common)
+                document = json.loads(stream.getvalue())
+                self.assertEqual(code, 10)
+                self.assertEqual(document["profile"], "voron-5-tool-tap-per-tool")
+                self.assertEqual(document["summary"]["total"], 23)
+                self.assertEqual(document["command"], command[0])
+            self.assertEqual(before, snapshot([root]))
