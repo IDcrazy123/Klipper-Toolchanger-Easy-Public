@@ -53,7 +53,20 @@ primary_branch: main
 
 ## Updates that add new files
 
-New vendor entries introduced by an update are not installed automatically. Inspect one entry with `doctor --id ID` or `plan --dry-run --id ID`; only a `VENDOR_MISSING` item whose existing target parent is present may be linked with the single-entry `apply --id ID` command. Any other setup requires a separately reviewed procedure. Doctor/plan fingerprints are not authorization to run `install.sh`.
+New vendor entries introduced by an update are not installed automatically. First inspect the selected entry with one of these read-only commands:
+
+```text
+python3 -B -m ktc_manager doctor --id ID --manifest MANIFEST
+python3 -B -m ktc_manager plan --dry-run --id ID --manifest MANIFEST
+```
+
+Read and confirm the exact, case-sensitive `profile` in the doctor/plan output. Only a `VENDOR_MISSING` item whose existing target parent is present may use the single-entry command below, with the same manifest path and exact profile:
+
+```text
+python3 -B -m ktc_manager apply --id ID --expect-profile PROFILE --manifest MANIFEST
+```
+
+For TAP, pass the TAP manifest to both inspection and apply. Omit `--manifest` only when you have intentionally chosen the default Cartographer profile. Collisions remain STOP / REVIEW REQUIRED; fingerprints do not authorize apply or `install.sh`. Any other setup requires a separately reviewed procedure.
 
 # VERY BASIC CONFIGURATION
 At a minimum you will need to: 
