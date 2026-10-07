@@ -19,8 +19,17 @@ PROFILE_ALIASES = {
 }
 
 
+class _ArgumentParseError(Exception):
+    pass
+
+
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise _ArgumentParseError(message)
+
+
 def _parser():
-    parser = argparse.ArgumentParser(prog="ktc_manager", description=HELP)
+    parser = _ArgumentParser(prog="ktc_manager", description=HELP)
     sub = parser.add_subparsers(dest="command")
     for name in ("doctor", "plan", "apply"):
         child = sub.add_parser(name)
@@ -85,14 +94,85 @@ def _profile_error(args, message):
     return 65
 
 
+def _syntax_error(output_format, message="invalid command-line arguments"):
+    if output_format == "json":
+        print(json.dumps({"schema_version": 1, "error": message}, sort_keys=True))
+    else:
+        print("KTCM1 error %s" % message, file=sys.stderr)
+    return 64
+
+
+def _requested_format(argv):
+    if not argv:
+        return "text"
+    parser = _parser()
+    subparsers = next((action for action in parser._actions
+                      if isinstance(action, argparse._SubParsersAction)), None)
+    if subparsers is None or argv[0] not in subparsers.choices:
+        return "text"
+    command_parser = subparsers.choices[argv[0]]
+
+    def parse_option(token):
+        parsed = command_parser._parse_optional(token)
+        if isinstance(parsed, list):
+            parsed = parsed[0] if len(parsed) == 1 else None
+        if parsed is not None and len(parsed) == 4:
+            action, option_string, separator, explicit_value = parsed
+            return action, option_string, explicit_value if separator == "=" else separator
+        return parsed
+
+    values = []
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            break
+        try:
+            parsed = parse_option(token)
+        except _ArgumentParseError:
+            index += 1
+            continue
+        except argparse.ArgumentError:
+            index += 1
+            continue
+        if parsed is not None and parsed[0] is not None and parsed[0].dest == "format":
+            explicit_value = parsed[2]
+            if explicit_value is not None:
+                values.append(explicit_value)
+            elif index + 1 < len(argv) and argv[index + 1] != "--":
+                next_token = argv[index + 1]
+                try:
+                    next_parsed = parse_option(next_token)
+                except _ArgumentParseError:
+                    next_parsed = None
+                except argparse.ArgumentError:
+                    next_parsed = (None, None, None)
+                if next_parsed is None:
+                    values.append(next_token)
+                    index += 1
+                else:
+                    values.append(None)
+            else:
+                values.append(None)
+        index += 1
+    if values and all(value == "json" for value in values):
+        return "json"
+    return "text"
+
+
 def main(argv=None):
     parser = _parser()
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     try:
-        args = parser.parse_args(argv)
+        args = parser.parse_args(raw_argv)
+    except _ArgumentParseError:
+        return _syntax_error(_requested_format(raw_argv))
     except SystemExit as exc:
         return 0 if exc.code == 0 else 64
-    if args.command is None or (args.command == "plan" and not args.dry_run):
-        return 64
+    if args.command is None:
+        return _syntax_error(getattr(args, "format", "text"), "command required")
+    if args.command == "plan" and not args.dry_run:
+        return _syntax_error(args.format, "plan requires --dry-run")
     if args.command == "apply" and (args.ids is None or len(args.ids) != 1):
         return _usage_error(args, "apply requires exactly one --id")
     if args.command == "apply" and (args.expected_profiles is None or len(args.expected_profiles) != 1):
