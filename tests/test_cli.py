@@ -1,11 +1,19 @@
 import contextlib
 import io
 import json
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from ktc_manager.cli import main
 from ktc_manager.cli import _text
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_MANIFEST = ROOT / "manifests" / "ownership-v1.json"
+TAP_MANIFEST = ROOT / "manifests" / "ownership-v1-tap-per-tool.json"
 
 
 class CliTests(unittest.TestCase):
@@ -101,3 +109,133 @@ class CliTests(unittest.TestCase):
                     code = main(base + ["--id", "one", "--id", "one", "--format", output_format])
                 self.assertEqual(code, 64)
                 self.assertNotIn("usage:", stream.getvalue().lower() + error.getvalue().lower())
+
+    def test_profile_aliases_select_manifests_for_doctor_and_plan(self):
+        with tempfile.TemporaryDirectory(prefix="repo space Ω ") as directory:
+            repo = Path(directory)
+            manifests = repo / "manifests"
+            manifests.mkdir()
+            (manifests / DEFAULT_MANIFEST.name).write_text(DEFAULT_MANIFEST.read_text(encoding="utf-8"),
+                                                            encoding="utf-8")
+            (manifests / TAP_MANIFEST.name).write_text(TAP_MANIFEST.read_text(encoding="utf-8"),
+                                                       encoding="utf-8")
+            for alias, profile in (("cartographer", "voron-5-tool-cartographer"),
+                                   ("tap-per-tool", "voron-5-tool-tap-per-tool")):
+                for command in (("doctor",), ("plan", "--dry-run")):
+                    stream = io.StringIO()
+                    with contextlib.redirect_stdout(stream):
+                        code = main(list(command) + ["--profile", alias, "--id", "missing",
+                                                     "--repo-root", str(repo), "--format", "json"])
+                    self.assertEqual(code, 10)
+                    document = json.loads(stream.getvalue())
+                    self.assertEqual(document["profile"], profile)
+                    key = "results" if command[0] == "doctor" else "actions"
+                    self.assertEqual(document[key][0]["code"], "UNKNOWN_ID")
+
+    def test_no_profile_keeps_default_and_custom_manifest_remains_supported(self):
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            code = main(["doctor", "--id", "missing", "--repo-root", str(ROOT), "--format", "json"])
+        self.assertEqual(code, 10)
+        self.assertEqual(json.loads(stream.getvalue())["profile"], "voron-5-tool-cartographer")
+
+        with tempfile.TemporaryDirectory() as directory:
+            custom = Path(directory) / "custom.json"
+            custom.write_text(json.dumps({"schema_version": 1, "profile": "custom-profile",
+                                          "entries": []}), encoding="utf-8")
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                code = main(["doctor", "--manifest", str(custom), "--id", "missing",
+                             "--format", "json"])
+            self.assertEqual(code, 10)
+            self.assertEqual(json.loads(stream.getvalue())["profile"], "custom-profile")
+
+    def test_empty_explicit_manifest_does_not_select_default(self):
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            code = main(["doctor", "--manifest", "", "--repo-root", str(ROOT),
+                         "--id", "missing", "--format", "json"])
+        self.assertEqual(code, 65)
+        self.assertIn("error", json.loads(stream.getvalue()))
+
+    def test_profile_selector_usage_errors_are_deterministic_before_load(self):
+        cases = (
+            (["doctor", "--profile", "unknown"], "unknown --profile alias"),
+            (["doctor", "--profile", "cartographer", "--profile", "tap-per-tool"],
+             "doctor accepts at most one --profile"),
+            (["doctor", "--profile", "cartographer", "--manifest", "missing.json"],
+             "--profile and --manifest are mutually exclusive"),
+        )
+        for output_format in ("text", "json"):
+            for args, message in cases:
+                stream = io.StringIO()
+                error = io.StringIO()
+                with patch("ktc_manager.cli.load_manifest") as load, \
+                     patch("ktc_manager.cli.inspect") as inspect, \
+                     contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+                    code = main(args + ["--format", output_format])
+                self.assertEqual(code, 64)
+                load.assert_not_called()
+                inspect.assert_not_called()
+                self.assertNotIn("usage:", stream.getvalue().lower() + error.getvalue().lower())
+                if output_format == "json":
+                    self.assertEqual(json.loads(stream.getvalue())["error"], message)
+                    self.assertEqual(error.getvalue(), "")
+                else:
+                    self.assertEqual(stream.getvalue(), "")
+                    self.assertEqual(error.getvalue(), "KTCM1 error %s\n" % message)
+
+    def test_alias_manifest_profile_mismatch_is_exit_65_before_inspection(self):
+        for output_format in ("text", "json"):
+            stream = io.StringIO()
+            error = io.StringIO()
+            with patch("ktc_manager.cli.load_manifest",
+                       return_value=SimpleNamespace(profile="wrong-profile")) as load, \
+                 patch("ktc_manager.cli.inspect") as inspect, \
+                 contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+                code = main(["doctor", "--profile", "cartographer", "--format", output_format])
+            self.assertEqual(code, 65)
+            load.assert_called_once()
+            inspect.assert_not_called()
+            self.assertNotIn("wrong-profile", stream.getvalue() + error.getvalue())
+            if output_format == "json":
+                self.assertEqual(json.loads(stream.getvalue())["error"],
+                                 "manifest profile does not match --profile")
+            else:
+                self.assertEqual(error.getvalue(),
+                                 "KTCM1 error manifest profile does not match --profile\n")
+
+    def test_tap_alias_with_expected_profile_reaches_apply(self):
+        document = {"schema_version": 1, "command": "apply",
+                    "profile": "voron-5-tool-tap-per-tool", "dry_run": False,
+                    "result": "NOOP", "actions": [],
+                    "summary": {"total": 0, "blockers": 0}}
+        stream = io.StringIO()
+        with patch("ktc_manager.cli.apply_entry", return_value=(document, 0)) as apply, \
+             contextlib.redirect_stdout(stream):
+            code = main(["apply", "--profile", "tap-per-tool", "--id", "missing",
+                         "--expect-profile", "voron-5-tool-tap-per-tool",
+                         "--repo-root", str(ROOT), "--format", "json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stream.getvalue())["profile"], "voron-5-tool-tap-per-tool")
+        self.assertEqual(apply.call_args.args[0].profile, "voron-5-tool-tap-per-tool")
+
+    def test_profile_alias_and_expected_profile_mismatch_is_exit_65(self):
+        for alias, expected in (("cartographer", "voron-5-tool-tap-per-tool"),
+                                ("tap-per-tool", "voron-5-tool-cartographer")):
+            with patch("ktc_manager.cli.apply_entry") as apply:
+                code = main(["apply", "--profile", alias, "--id", "missing",
+                             "--expect-profile", expected, "--repo-root", str(ROOT),
+                             "--format", "json"])
+            self.assertEqual(code, 65)
+            apply.assert_not_called()
+
+    def test_profile_does_not_remove_apply_expected_profile_requirement(self):
+        stream = io.StringIO()
+        error = io.StringIO()
+        with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+            code = main(["apply", "--profile", "cartographer", "--id", "missing",
+                         "--repo-root", str(ROOT), "--format", "text"])
+        self.assertEqual(code, 64)
+        self.assertEqual(error.getvalue(), "KTCM1 error apply requires exactly one --expect-profile\n")
+        self.assertEqual(stream.getvalue(), "")
