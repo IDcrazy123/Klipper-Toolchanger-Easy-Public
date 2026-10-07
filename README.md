@@ -60,10 +60,10 @@ python3 -B -m ktc_manager doctor --id ID --manifest MANIFEST
 python3 -B -m ktc_manager plan --dry-run --id ID --manifest MANIFEST
 ```
 
-Read and confirm the exact, case-sensitive `profile` in the doctor/plan output. Only a `VENDOR_MISSING` item whose existing target parent is present may use the single-entry command below, with the same manifest path and exact profile:
+Read and confirm the exact, case-sensitive `profile` and `manifest_sha256` in the doctor/plan output. Only a `VENDOR_MISSING` item whose existing target parent is present may use the single-entry command below, with the same manifest selector and exact profile and digest:
 
 ```text
-python3 -B -m ktc_manager apply --id ID --expect-profile PROFILE --manifest MANIFEST
+python3 -B -m ktc_manager apply --id ID --expect-profile PROFILE --expect-manifest-sha256 SHA256 --manifest MANIFEST
 ```
 
 For TAP, pass the TAP manifest to both inspection and apply. Omit `--manifest` only when you have intentionally chosen the default Cartographer profile. Collisions remain STOP / REVIEW REQUIRED; fingerprints do not authorize apply or `install.sh`. Any other setup requires a separately reviewed procedure.

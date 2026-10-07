@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -115,8 +116,15 @@ def parse_manifest_data(data):
 
 
 def load_manifest(path):
+    manifest, _digest = load_manifest_with_digest(path)
+    return manifest
+
+
+def load_manifest_with_digest(path):
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        raw = Path(path).read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        data = json.loads(raw.decode("utf-8"))
     except (OSError, ValueError) as exc:
         raise ManifestError("cannot read manifest: %s" % exc)
-    return parse_manifest_data(data)
+    return parse_manifest_data(data), digest

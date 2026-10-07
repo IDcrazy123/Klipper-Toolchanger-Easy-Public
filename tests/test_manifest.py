@@ -1,13 +1,16 @@
 import json
+import hashlib
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from ktc_manager.cli import main
 from ktc_manager.inspector import snapshot
-from ktc_manager.model import ManifestError, load_manifest, parse_manifest_data
+from ktc_manager.model import (ManifestError, load_manifest, load_manifest_with_digest,
+                               parse_manifest_data)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -146,6 +149,29 @@ class ManifestTests(unittest.TestCase):
             path = Path(directory) / "m.json"
             path.write_text(json.dumps(self.data), encoding="utf-8")
             self.assertEqual(len(load_manifest(path).entries), 22)
+
+    def test_manifest_digest_is_raw_bytes_and_single_read(self):
+        lf = b'{"schema_version":1,"profile":"raw","entries":[]}\n'
+        crlf = b'{\r\n  "schema_version": 1,\r\n  "profile": "raw",\r\n  "entries": []\r\n}\r\n'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            for raw in (lf, crlf):
+                path.write_bytes(raw)
+                original = Path.read_bytes
+                calls = []
+
+                def read_once(target):
+                    if target == path:
+                        calls.append(target)
+                    return original(target)
+
+                with patch("pathlib.Path.read_bytes", autospec=True, side_effect=read_once):
+                    manifest, digest = load_manifest_with_digest(path)
+                self.assertEqual(manifest.profile, "raw")
+                self.assertEqual(digest, hashlib.sha256(raw).hexdigest())
+                self.assertEqual(len(calls), 1)
+            self.assertNotEqual(hashlib.sha256(lf).hexdigest(), hashlib.sha256(crlf).hexdigest())
+            self.assertEqual(load_manifest(path).profile, "raw")
 
     def test_tap_profile_counts_mapping_and_exact_delta(self):
         cartographer = load_manifest(MANIFEST)
