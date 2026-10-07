@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import json
 import tempfile
@@ -14,6 +15,10 @@ from ktc_manager.cli import _text
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "manifests" / "ownership-v1.json"
 TAP_MANIFEST = ROOT / "manifests" / "ownership-v1-tap-per-tool.json"
+
+
+def manifest_digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 class CliTests(unittest.TestCase):
@@ -65,7 +70,22 @@ class CliTests(unittest.TestCase):
         with contextlib.redirect_stdout(stream):
             code = main(["doctor", "--format", "json"])
         self.assertIn(code, (0, 10))
-        self.assertIsInstance(json.loads(stream.getvalue()), dict)
+        document = json.loads(stream.getvalue())
+        self.assertIsInstance(document, dict)
+        self.assertRegex(document["manifest_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_doctor_plan_digest_matches_selected_manifest_and_text_header(self):
+        expected = manifest_digest(DEFAULT_MANIFEST)
+        for command in (("doctor",), ("plan", "--dry-run")):
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                code = main(list(command) + ["--profile", "cartographer", "--format", "json"])
+            self.assertIn(code, (0, 10))
+            self.assertEqual(json.loads(stream.getvalue())["manifest_sha256"], expected)
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            main(["doctor", "--profile", "cartographer", "--format", "text"])
+        self.assertIn("manifest_sha256=%s" % expected, stream.getvalue().splitlines()[0])
 
     def test_json_unexpected_error_is_one_document_and_text_error_is_stderr(self):
         stream = io.StringIO()
@@ -170,7 +190,7 @@ class CliTests(unittest.TestCase):
             for args, message in cases:
                 stream = io.StringIO()
                 error = io.StringIO()
-                with patch("ktc_manager.cli.load_manifest") as load, \
+                with patch("ktc_manager.cli.load_manifest_with_digest") as load, \
                      patch("ktc_manager.cli.inspect") as inspect, \
                      contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
                     code = main(args + ["--format", output_format])
@@ -189,8 +209,8 @@ class CliTests(unittest.TestCase):
         for output_format in ("text", "json"):
             stream = io.StringIO()
             error = io.StringIO()
-            with patch("ktc_manager.cli.load_manifest",
-                       return_value=SimpleNamespace(profile="wrong-profile")) as load, \
+            with patch("ktc_manager.cli.load_manifest_with_digest",
+                       return_value=(SimpleNamespace(profile="wrong-profile"), "0" * 64)) as load, \
                  patch("ktc_manager.cli.inspect") as inspect, \
                  contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
                 code = main(["doctor", "--profile", "cartographer", "--format", output_format])
@@ -215,6 +235,7 @@ class CliTests(unittest.TestCase):
              contextlib.redirect_stdout(stream):
             code = main(["apply", "--profile", "tap-per-tool", "--id", "missing",
                          "--expect-profile", "voron-5-tool-tap-per-tool",
+                         "--expect-manifest-sha256", manifest_digest(TAP_MANIFEST),
                          "--repo-root", str(ROOT), "--format", "json"])
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(stream.getvalue())["profile"], "voron-5-tool-tap-per-tool")
@@ -226,6 +247,8 @@ class CliTests(unittest.TestCase):
             with patch("ktc_manager.cli.apply_entry") as apply:
                 code = main(["apply", "--profile", alias, "--id", "missing",
                              "--expect-profile", expected, "--repo-root", str(ROOT),
+                             "--expect-manifest-sha256",
+                             manifest_digest(DEFAULT_MANIFEST if alias == "cartographer" else TAP_MANIFEST),
                              "--format", "json"])
             self.assertEqual(code, 65)
             apply.assert_not_called()

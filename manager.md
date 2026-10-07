@@ -12,12 +12,12 @@ The KTC-Easy manager is a state inspector with one narrowly scoped create-only o
 ```text
 python3 -B -m ktc_manager doctor [--profile ALIAS] [--id ID] [--format text|json]
 python3 -B -m ktc_manager plan --dry-run [--profile ALIAS] [--id ID] [--format text|json]
-python3 -B -m ktc_manager apply [--profile ALIAS] --id ID --expect-profile PROFILE [--format text|json]
+python3 -B -m ktc_manager apply [--profile ALIAS] --id ID --expect-profile PROFILE --expect-manifest-sha256 SHA256 [--format text|json]
 ```
 
 `ID` matching is exact and case-sensitive. Without `--id`, `doctor` and `plan` retain their all-entry behavior. A selected command returns exactly one item/action. Repeating `--id` is a usage error. `plan` always requires `--dry-run`; `apply` requires exactly one ID.
 
-`apply` also requires exactly one `--expect-profile PROFILE`. Obtain the exact profile string from an earlier `doctor` or `plan` result, then reuse that same value with the same manifest selector (`--profile` alias or `--manifest` path). The comparison is an exact, case-sensitive identity-string guard; it does not bind the manifest bytes or a filesystem snapshot, and it is not a plan token or TOCTOU protection. A mismatch returns exit 65 before apply execution.
+`doctor` and `plan` report `manifest_sha256`, the lowercase SHA-256 of the exact manifest file bytes used. `apply` requires exactly one `--expect-profile PROFILE` and one `--expect-manifest-sha256 SHA256`. Copy both values from the earlier output and reuse the same manifest selector (`--profile` alias or `--manifest` path). A profile mismatch or raw-byte digest mismatch returns exit 65 before apply execution. The digest binds the manifest bytes, but does not confirm source/target state or a Git commit and does not eliminate all TOCTOU risk.
 
 The optional `--profile` aliases select built-in manifests relative to `--repo-root`: `cartographer` selects `manifests/ownership-v1.json` and profile `voron-5-tool-cartographer`; `tap-per-tool` selects `manifests/ownership-v1-tap-per-tool.json` and profile `voron-5-tool-tap-per-tool`. With no alias, the default remains the Cartographer manifest. `--profile` and an explicit `--manifest` are mutually exclusive; a custom manifest continues to work when `--profile` is omitted. Aliases do not detect or validate hardware.
 
@@ -52,8 +52,8 @@ Doctor and plan collision results may include raw-byte SHA-256 values for source
 - `0`: no blocker, or a successful/no-op apply.
 - `10`: domain or filesystem blocker, including an unknown ID.
 - `20`: apply failed or became indeterminate after an attempted syscall.
-- `64`: CLI usage, selector cardinality, or missing `plan --dry-run`.
-- `65`: invalid or unreadable manifest, or `--expect-profile` mismatch.
+- `64`: CLI usage, selector cardinality, invalid `--expect-manifest-sha256`, or missing `plan --dry-run`.
+- `65`: invalid or unreadable manifest, or `--expect-profile` / manifest digest mismatch.
 - `70`: unexpected internal error.
 
 ## Safety boundaries

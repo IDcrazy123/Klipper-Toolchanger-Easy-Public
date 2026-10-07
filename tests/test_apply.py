@@ -1,5 +1,6 @@
 import errno
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -18,6 +19,10 @@ from ktc_manager.model import ManifestError, parse_manifest_data
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "manifests" / "ownership-v1.json"
 TAP_MANIFEST = ROOT / "manifests" / "ownership-v1-tap-per-tool.json"
+
+
+def manifest_digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def manifest(owner="vendor-managed", source="source.txt", target="tool/target.py", ident="vendor",
@@ -446,6 +451,89 @@ class ApplyTests(unittest.TestCase):
                         "error": "apply requires exactly one --expect-profile",
                     })
 
+    def test_apply_digest_cardinality_and_syntax_fail_before_manifest_read(self):
+        cases = (([], "apply requires exactly one --expect-manifest-sha256"),
+                 (["--expect-manifest-sha256", "0" * 64,
+                   "--expect-manifest-sha256", "1" * 64],
+                  "apply requires exactly one --expect-manifest-sha256"),
+                 (["--expect-manifest-sha256", "A" * 64],
+                  "--expect-manifest-sha256 must be 64 lowercase hexadecimal characters"),
+                 (["--expect-manifest-sha256", "a" * 63],
+                  "--expect-manifest-sha256 must be 64 lowercase hexadecimal characters"))
+        for output_format in ("text", "json"):
+            for digest_args, message in cases:
+                stream = io.StringIO()
+                error = io.StringIO()
+                with patch("ktc_manager.cli.load_manifest_with_digest") as load, \
+                     patch("ktc_manager.executor.canonical_root") as executor_root, \
+                     patch("ktc_manager.inspector.canonical_root") as inspector_root, \
+                     contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+                    code = main(["apply", "--id", "vendor", "--expect-profile", "apply-test"] +
+                                digest_args + ["--format", output_format])
+                self.assertEqual(code, 64)
+                load.assert_not_called()
+                executor_root.assert_not_called()
+                inspector_root.assert_not_called()
+                if output_format == "json":
+                    self.assertEqual(json.loads(stream.getvalue())["error"], message)
+                    self.assertEqual(error.getvalue(), "")
+                else:
+                    self.assertEqual(error.getvalue(), "KTCM1 error %s\n" % message)
+
+    def test_profile_mismatch_precedes_digest_mismatch(self):
+        manifest_path = self.root / "different-profile.json"
+        manifest_path.write_text(json.dumps({"schema_version": 1, "profile": "different",
+                                             "entries": []}), encoding="utf-8")
+        stream = io.StringIO()
+        with patch("ktc_manager.cli.apply_entry") as apply, \
+             patch("ktc_manager.executor.canonical_root") as executor_root, \
+             patch("ktc_manager.inspector.canonical_root") as inspector_root, \
+             contextlib.redirect_stdout(stream):
+            code = main(["apply", "--id", "vendor", "--manifest", str(manifest_path),
+                         "--expect-profile", "apply-test", "--expect-manifest-sha256", "0" * 64,
+                         "--format", "json"])
+        self.assertEqual(code, 65)
+        self.assertEqual(json.loads(stream.getvalue())["error"],
+                         "manifest profile does not match --expect-profile")
+        apply.assert_not_called()
+        executor_root.assert_not_called()
+        inspector_root.assert_not_called()
+
+    def test_manifest_digest_mismatch_blocks_same_profile_before_executor(self):
+        manifest_path = self.root / "changed.json"
+        manifest_path.write_text(json.dumps({"schema_version": 1, "profile": "apply-test",
+                                             "entries": []}), encoding="utf-8")
+        stale_digest = manifest_digest(manifest_path)
+        manifest_path.write_text(json.dumps({"schema_version": 1, "profile": "apply-test",
+                                             "entries": [{"id": "protected", "owner": "user-managed",
+                                                          "target_root": "config", "target": "user.cfg"}]}),
+                                 encoding="utf-8")
+        self.assertNotEqual(stale_digest, manifest_digest(manifest_path))
+        for output_format in ("text", "json"):
+            stream = io.StringIO()
+            error = io.StringIO()
+            with patch("ktc_manager.cli.apply_entry") as apply, \
+                 patch("ktc_manager.executor.canonical_root") as executor_root, \
+                 patch("ktc_manager.inspector.canonical_root") as inspector_root, \
+                 contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+                code = main(["apply", "--id", "vendor", "--manifest", str(manifest_path),
+                             "--expect-profile", "apply-test", "--expect-manifest-sha256", stale_digest,
+                             "--repo-root", str(self.repo), "--klipper-root", str(self.klipper),
+                             "--config-root", str(self.config), "--format", output_format])
+            self.assertEqual(code, 65)
+            apply.assert_not_called()
+            executor_root.assert_not_called()
+            inspector_root.assert_not_called()
+            self.assertNotIn(stale_digest, stream.getvalue() + error.getvalue())
+            self.assertNotIn(manifest_digest(manifest_path), stream.getvalue() + error.getvalue())
+            if output_format == "json":
+                self.assertEqual(json.loads(stream.getvalue())["error"],
+                                 "manifest digest does not match --expect-manifest-sha256")
+                self.assertEqual(error.getvalue(), "")
+            else:
+                self.assertEqual(error.getvalue(),
+                                 "KTCM1 error manifest digest does not match --expect-manifest-sha256\n")
+
     def test_apply_id_cardinality_precedes_profile_cardinality(self):
         stream = io.StringIO()
         error = io.StringIO()
@@ -500,6 +588,7 @@ class ApplyTests(unittest.TestCase):
             args = ["apply", "--id", "unknown", "--manifest", str(manifest_path),
                     "--repo-root", str(self.repo), "--config-root", str(self.config),
                     "--klipper-root", str(self.klipper), "--expect-profile", "apply-test",
+                    "--expect-manifest-sha256", manifest_digest(manifest_path),
                     "--format", output_format]
             outputs = []
             for _ in range(2):
@@ -510,11 +599,17 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(outputs[0], outputs[1])
             self.assertNotIn("\x1b[", outputs[0])
             if output_format == "json":
-                self.assertEqual(json.loads(outputs[0])["result"], "BLOCKED")
+                document = json.loads(outputs[0])
+                self.assertEqual(document["result"], "BLOCKED")
+                self.assertEqual(document["manifest_sha256"], manifest_digest(manifest_path))
+            else:
+                self.assertIn("manifest_sha256=%s" % manifest_digest(manifest_path),
+                              outputs[0].splitlines()[0])
 
     def test_cli_apply_error_exit_boundaries(self):
         self.assertEqual(main(["apply", "--id", "vendor", "--manifest", str(self.root / "missing.json"),
-                               "--expect-profile", "apply-test", "--format", "json"]), 65)
+                               "--expect-profile", "apply-test", "--expect-manifest-sha256", "0" * 64,
+                               "--format", "json"]), 65)
         manifest_path = self.root / "valid.json"
         manifest_path.write_text(json.dumps({
             "schema_version": 1, "profile": "apply-test", "entries": [
@@ -526,6 +621,7 @@ class ApplyTests(unittest.TestCase):
             self.assertEqual(main(["apply", "--id", "vendor", "--manifest", str(manifest_path),
                                    "--repo-root", str(self.repo), "--config-root", str(self.config),
                                    "--klipper-root", str(self.klipper), "--expect-profile", "apply-test",
+                                   "--expect-manifest-sha256", manifest_digest(manifest_path),
                                    "--format", "json"]), 70)
 
     def test_apply_profile_mismatch_blocks_before_executor_and_roots(self):
@@ -542,6 +638,7 @@ class ApplyTests(unittest.TestCase):
                     code = main(["apply", "--id", "missing", "--manifest", str(manifest_path),
                                  "--repo-root", str(ROOT), "--klipper-root", str(self.klipper),
                                  "--config-root", str(self.config), "--expect-profile", expected,
+                                 "--expect-manifest-sha256", manifest_digest(manifest_path),
                                  "--format", output_format])
                 self.assertEqual(code, 65)
                 self.assertNotIn(actual, stream.getvalue() + error.getvalue())
@@ -568,7 +665,9 @@ class ApplyTests(unittest.TestCase):
             code = main(["apply", "--id", "missing", "--manifest", str(DEFAULT_MANIFEST),
                          "--repo-root", str(ROOT), "--klipper-root", str(self.klipper),
                          "--config-root", str(self.config),
-                         "--expect-profile", "VORON-5-TOOL-CARTOGRAPHER", "--format", "json"])
+                         "--expect-profile", "VORON-5-TOOL-CARTOGRAPHER",
+                         "--expect-manifest-sha256", manifest_digest(DEFAULT_MANIFEST),
+                         "--format", "json"])
         self.assertEqual(code, 65)
         self.assertEqual(json.loads(stream.getvalue())["error"],
                          "manifest profile does not match --expect-profile")
@@ -586,7 +685,9 @@ class ApplyTests(unittest.TestCase):
              contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
             code = main(["apply", "--id", "missing", "--repo-root", str(ROOT),
                          "--klipper-root", str(self.klipper), "--config-root", str(self.config),
-                         "--expect-profile", "voron-5-tool-tap-per-tool", "--format", "json"])
+                         "--expect-profile", "voron-5-tool-tap-per-tool",
+                         "--expect-manifest-sha256", manifest_digest(DEFAULT_MANIFEST),
+                         "--format", "json"])
         self.assertEqual(code, 65)
         self.assertEqual(json.loads(stream.getvalue()), {
             "schema_version": 1,
@@ -609,6 +710,7 @@ class ApplyTests(unittest.TestCase):
                 code = main(["apply", "--id", "missing", "--manifest", str(manifest_path),
                              "--repo-root", str(self.repo), "--klipper-root", str(self.klipper),
                              "--config-root", str(self.config), "--expect-profile", "apply-test",
+                             "--expect-manifest-sha256", manifest_digest(manifest_path),
                              "--format", "json"])
             self.assertEqual(code, 65)
             self.assertIn("error", json.loads(stream.getvalue()))
@@ -628,6 +730,7 @@ class ApplyTests(unittest.TestCase):
                 code = main(["apply", "--id", "missing", "--manifest", str(manifest_path),
                              "--repo-root", str(ROOT), "--klipper-root", str(self.klipper),
                              "--config-root", str(self.config), "--expect-profile", profile,
+                             "--expect-manifest-sha256", manifest_digest(manifest_path),
                              "--format", "json"])
             self.assertEqual(code, 0)
             self.assertEqual(apply.call_args.args[0].profile, profile)
@@ -645,7 +748,9 @@ class ApplyTests(unittest.TestCase):
             code = main(["apply", "--id", "definitely-unknown", "--manifest", str(DEFAULT_MANIFEST),
                          "--repo-root", str(ROOT), "--klipper-root", str(self.klipper),
                          "--config-root", str(self.config),
-                         "--expect-profile", "voron-5-tool-cartographer", "--format", "json"])
+                         "--expect-profile", "voron-5-tool-cartographer",
+                         "--expect-manifest-sha256", manifest_digest(DEFAULT_MANIFEST),
+                         "--format", "json"])
         self.assertEqual(code, 10)
         document = json.loads(stream.getvalue())
         self.assertEqual(document["actions"][0]["code"], "UNKNOWN_ID")

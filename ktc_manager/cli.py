@@ -1,4 +1,5 @@
 import argparse
+import re
 import json
 import os
 import sys
@@ -6,10 +7,11 @@ from pathlib import Path
 
 from .executor import apply_entry
 from .inspector import inspect, output_document, summary
-from .model import ManifestError, load_manifest
+from .model import ManifestError, load_manifest_with_digest
 
 
 HELP = "Read-only doctor, dry-run plan, and create-only single-entry apply for KTC-Easy."
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DEFAULT_MANIFEST = "manifests/ownership-v1.json"
 PROFILE_ALIASES = {
     "cartographer": ("manifests/ownership-v1.json", "voron-5-tool-cartographer"),
@@ -35,6 +37,7 @@ def _parser():
         if name == "apply":
             child.add_argument("--id", dest="ids", action="append")
             child.add_argument("--expect-profile", dest="expected_profiles", action="append")
+            child.add_argument("--expect-manifest-sha256", dest="expected_manifest_digests", action="append")
     return parser
 
 
@@ -55,8 +58,9 @@ def _defaults(args):
 def _text(document, command):
     profile = json.dumps(document["profile"], ensure_ascii=False, separators=(",", ":"))
     result = (" result=%s" % document["result"]) if command == "apply" else ""
-    lines = ["KTCM1 %s profile=%s dry_run=%s%s" %
-             (command, profile, str(document["dry_run"]).lower(), result)]
+    lines = ["KTCM1 %s profile=%s manifest_sha256=%s dry_run=%s%s" %
+             (command, profile, document.get("manifest_sha256", ""),
+              str(document["dry_run"]).lower(), result)]
     values = document["results"] if command == "doctor" else document["actions"]
     for item in values:
         lines.append("KTCM1 item %s" % json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
@@ -102,9 +106,14 @@ def main(argv=None):
             return _usage_error(args, "--profile and --manifest are mutually exclusive")
         if args.profiles and args.profiles[0] not in PROFILE_ALIASES:
             return _usage_error(args, "unknown --profile alias")
+    if args.command == "apply":
+        if args.expected_manifest_digests is None or len(args.expected_manifest_digests) != 1:
+            return _usage_error(args, "apply requires exactly one --expect-manifest-sha256")
+        if not _SHA256_RE.fullmatch(args.expected_manifest_digests[0]):
+            return _usage_error(args, "--expect-manifest-sha256 must be 64 lowercase hexadecimal characters")
     try:
         manifest_path, repo, klipper, config = _defaults(args)
-        manifest = load_manifest(manifest_path)
+        manifest, manifest_sha256 = load_manifest_with_digest(manifest_path)
         if args.profiles:
             expected_profile = PROFILE_ALIASES[args.profiles[0]][1]
             if manifest.profile != expected_profile:
@@ -119,12 +128,22 @@ def main(argv=None):
                     print("KTCM1 error manifest profile does not match --expect-profile",
                           file=sys.stderr)
                 return 65
+            if args.expected_manifest_digests[0] != manifest_sha256:
+                if args.format == "json":
+                    print(json.dumps({"schema_version": 1,
+                                      "error": "manifest digest does not match --expect-manifest-sha256"},
+                                     sort_keys=True))
+                else:
+                    print("KTCM1 error manifest digest does not match --expect-manifest-sha256",
+                          file=sys.stderr)
+                return 65
             document, exit_code = apply_entry(manifest, args.ids[0], repo, klipper, config)
         else:
             entry_id = args.ids[0] if args.command in ("doctor", "plan") and args.ids else None
             results = inspect(manifest, repo, klipper, config, entry_id)
             document = output_document(args.command, manifest, results, args.command == "plan")
             exit_code = 10 if document["summary"]["blockers"] else 0
+        document["manifest_sha256"] = manifest_sha256
     except ManifestError as exc:
         if getattr(args, "format", "text") == "json":
             print(json.dumps({"schema_version": 1, "error": str(exc)}, sort_keys=True))
