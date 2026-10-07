@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ktc_manager.cli import main
+from ktc_manager.cli import _ArgumentParseError, _ArgumentParser, main
 from ktc_manager.cli import _text
 
 
@@ -27,6 +27,104 @@ class CliTests(unittest.TestCase):
         with contextlib.redirect_stdout(stream):
             self.assertEqual(main(["--help"]), 0)
         self.assertIn("Read-only", stream.getvalue())
+
+    def test_parse_time_syntax_errors_are_safe_and_do_not_inspect(self):
+        cases = (
+            (["doctor", "--format", "json", "--repo-root"], "json"),
+            (["apply", "--format=json", "--id", "vendor", "--expect-profile"], "json"),
+            (["apply", "--format=json", "--id", "vendor", "--expect-profile", "p",
+              "--expect-manifest-sha256"], "json"),
+            (["doctor", "--unknown-option", "hostile\nKTCM1 item forged"], "text"),
+            (["unknown-command\nKTCM1 item forged", "--format=json"], "text"),
+            (["doctor", "--format", "json", "--format", "text", "--unknown-option"], "text"),
+            (["doctor", "--", "--format=json"], "text"),
+            (["doctor", "--format=json", "--", "--format=text"], "json"),
+            (["doctor", "--forma=json", "--bogus"], "json"),
+            (["apply", "--expect-", "--format=json"], "json"),
+            (["apply", "--format=json", "--expect-"], "json"),
+        )
+        for args, output_format in cases:
+            stream = io.StringIO()
+            error = io.StringIO()
+            with patch("ktc_manager.cli.load_manifest_with_digest") as load, \
+                 patch("ktc_manager.cli.inspect") as inspect, \
+                 patch("ktc_manager.cli.apply_entry") as apply, \
+                 patch("ktc_manager.inspector.canonical_root") as root, \
+                 contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+                code = main(args)
+            self.assertEqual(code, 64)
+            load.assert_not_called()
+            inspect.assert_not_called()
+            apply.assert_not_called()
+            root.assert_not_called()
+            self.assertNotIn("usage:", stream.getvalue().lower() + error.getvalue().lower())
+            self.assertNotIn("\x1b[", stream.getvalue() + error.getvalue())
+            self.assertNotIn("hostile", stream.getvalue() + error.getvalue())
+            self.assertNotIn("forged", stream.getvalue() + error.getvalue())
+            if output_format == "json":
+                self.assertEqual(json.loads(stream.getvalue()), {
+                    "schema_version": 1,
+                    "error": "invalid command-line arguments",
+                })
+                self.assertEqual(error.getvalue(), "")
+            else:
+                self.assertEqual(stream.getvalue(), "")
+                self.assertEqual(error.getvalue(),
+                                 "KTCM1 error invalid command-line arguments\n")
+
+    def test_python39_ambiguous_option_exception_keeps_later_json_format(self):
+        real_parse_optional = _ArgumentParser._parse_optional
+
+        def python39_ambiguous(self, arg_string):
+            if arg_string == "--expect-":
+                raise _ArgumentParseError("ambiguous option")
+            return real_parse_optional(self, arg_string)
+
+        for args in (["apply", "--expect-", "--format=json"],
+                     ["apply", "--format=json", "--expect-"]):
+            stream = io.StringIO()
+            error = io.StringIO()
+            with patch.object(_ArgumentParser, "_parse_optional", python39_ambiguous), \
+                 patch("ktc_manager.cli.load_manifest_with_digest") as load, \
+                 patch("ktc_manager.cli.apply_entry") as apply, \
+                 patch("ktc_manager.inspector.canonical_root") as root, \
+                 contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+                code = main(args)
+            self.assertEqual(code, 64)
+            self.assertEqual(json.loads(stream.getvalue()), {
+                "schema_version": 1,
+                "error": "invalid command-line arguments",
+            })
+            self.assertEqual(error.getvalue(), "")
+            load.assert_not_called()
+            apply.assert_not_called()
+            root.assert_not_called()
+
+    def test_missing_command_and_plan_dry_run_errors_are_specific(self):
+        stream = io.StringIO()
+        error = io.StringIO()
+        with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+            self.assertEqual(main([]), 64)
+        self.assertEqual(stream.getvalue(), "")
+        self.assertEqual(error.getvalue(), "KTCM1 error command required\n")
+
+        for fmt in ("text", "json"):
+            stream = io.StringIO()
+            error = io.StringIO()
+            with patch("ktc_manager.cli.load_manifest_with_digest") as load, \
+                 patch("ktc_manager.cli.inspect") as inspect, \
+                 contextlib.redirect_stdout(stream), contextlib.redirect_stderr(error):
+                code = main(["plan", "--format", fmt])
+            self.assertEqual(code, 64)
+            load.assert_not_called()
+            inspect.assert_not_called()
+            if fmt == "json":
+                self.assertEqual(json.loads(stream.getvalue()), {
+                    "schema_version": 1, "error": "plan requires --dry-run"})
+                self.assertEqual(error.getvalue(), "")
+            else:
+                self.assertEqual(stream.getvalue(), "")
+                self.assertEqual(error.getvalue(), "KTCM1 error plan requires --dry-run\n")
 
     def test_text_has_protocol_prefix(self):
         stream = io.StringIO()
