@@ -325,6 +325,38 @@ def _collision_fingerprints(entry, repo, root, source, target):
     }
 
 
+def _selected_missing_source_digest(entry, repo, roots, result):
+    source_code, source = _source_state(entry, repo)
+    if source_code:
+        result["code"] = source_code
+        return result
+    source_code, fingerprint = _stream_file(source, "source")
+    if source_code:
+        result["code"] = source_code
+        return result
+
+    post = inspect_entry(entry, repo, roots)
+    if post["code"] != "VENDOR_MISSING":
+        if post["code"].startswith("VENDOR_"):
+            post["code"] = "TARGET_CHANGED"
+        return post
+    try:
+        final_info = os.lstat(post["source"])
+    except PermissionError:
+        post["code"] = "SOURCE_UNREADABLE"
+        return post
+    except OSError:
+        post["code"] = "SOURCE_CHANGED"
+        return post
+    if (not _ordinary_regular(final_info) or
+            _file_state(final_info) != fingerprint["state"]):
+        post["code"] = "SOURCE_CHANGED"
+        return post
+
+    post["source_sha256"] = fingerprint["raw_sha256"]
+    return post
+
+
 def inspect_entry(entry: Entry, repo_root, roots):
     repo = canonical_root(repo_root) if entry.owner == "vendor-managed" else None
     root = roots[entry.target_root]
@@ -378,6 +410,11 @@ def inspect(manifest: Manifest, repo_root, klipper_root, config_root, entry_id=N
     results = []
     for entry in selected:
         result = inspect_entry(entry, repo_root, roots)
+        if (entry_id is not None and entry.owner == "vendor-managed" and
+                result.get("code") == "VENDOR_MISSING"):
+            repo = canonical_root(repo_root)
+            root = roots[entry.target_root]
+            result = _selected_missing_source_digest(entry, repo, roots, result)
         if result.get("code") == "VENDOR_COLLISION_FILE":
             repo = canonical_root(repo_root)
             root = roots[entry.target_root]
