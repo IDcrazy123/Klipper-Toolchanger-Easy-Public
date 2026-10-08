@@ -2,6 +2,7 @@ import json
 import hashlib
 import tempfile
 import unittest
+from collections import Counter
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -58,6 +59,25 @@ class ManifestTests(unittest.TestCase):
             ("user-managed", "config", "toolchanger/tools/T4.cfg"),
             ("machine-state", "config", "printer.cfg"),
         })
+
+    def test_klipper_extras_files_have_exactly_one_matching_vendor_entry(self):
+        extra_names = sorted(path.name for path in (ROOT / "klipper" / "extras").glob("*.py"))
+        self.assertTrue(extra_names, "expected direct Klipper extras Python files")
+        expected = Counter(("klipper/extras/" + name, "klipper",
+                            "klippy/extras/" + name, "vendor-managed", "symlink")
+                           for name in extra_names)
+        for manifest_path in (MANIFEST, TAP_MANIFEST):
+            with self.subTest(manifest=manifest_path.name):
+                entries = load_manifest(manifest_path).entries
+                slice_entries = [entry for entry in entries
+                                 if (entry.source or "").startswith("klipper/extras/")
+                                 or (entry.target_root == "klipper"
+                                     and entry.target.startswith("klippy/extras/"))]
+                actual = Counter((entry.source, entry.target_root, entry.target,
+                                  entry.owner, entry.delivery)
+                                 for entry in slice_entries)
+                self.assertEqual(len(slice_entries), len(extra_names))
+                self.assertEqual(actual, expected)
 
     def test_exact_schema_and_paths(self):
         for key in ("extra",):
