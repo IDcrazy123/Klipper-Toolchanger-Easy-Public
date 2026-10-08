@@ -2,6 +2,7 @@ import json
 import hashlib
 import io
 import contextlib
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -120,6 +121,55 @@ class PlanTests(unittest.TestCase):
                     stream_file.assert_not_called()
                     if present:
                         target_path.unlink()
+
+    def test_source_permission_errors_block_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, klipper, config = root / "repo", root / "klipper", root / "config"
+            repo.mkdir(); klipper.mkdir(); config.mkdir()
+            source = repo / "source.txt"
+            source.write_text("source", encoding="utf-8")
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text(json.dumps({
+                "schema_version": 1, "profile": "test", "entries": [{
+                    "id": "vendor", "owner": "vendor-managed", "source": "source.txt",
+                    "target_root": "config", "target": "target.txt", "delivery": "symlink"
+                }]
+            }), encoding="utf-8")
+            real_lstat, real_resolve = os.lstat, Path.resolve
+            def is_source(path):
+                try:
+                    return os.path.samefile(path, source)
+                except OSError:
+                    return os.path.normcase(os.path.abspath(os.fspath(path))) == \
+                        os.path.normcase(os.path.abspath(str(source)))
+            def deny_lstat(path):
+                if is_source(path):
+                    raise PermissionError("denied")
+                return real_lstat(path)
+            def deny_source(path, *args, **kwargs):
+                if is_source(path) and kwargs.get("strict"):
+                    raise PermissionError("denied")
+                return real_resolve(path, *args, **kwargs)
+
+            for check in ("lstat", "resolve"):
+                with self.subTest(check=check):
+                    output = io.StringIO()
+                    mocked_check = (patch("ktc_manager.inspector.os.lstat", side_effect=deny_lstat)
+                                    if check == "lstat" else
+                                    patch("ktc_manager.inspector.Path.resolve", autospec=True,
+                                          side_effect=deny_source))
+                    with mocked_check, contextlib.redirect_stdout(output):
+                        exit_code = main([
+                            "plan", "--dry-run", "--format", "json", "--manifest",
+                            str(manifest_path), "--repo-root", str(repo),
+                            "--klipper-root", str(klipper), "--config-root", str(config)])
+                    action = json.loads(output.getvalue())["actions"][0]
+                    self.assertEqual(exit_code, 10)
+                    self.assertEqual((action["action"], action["code"]),
+                                     ("BLOCKED", "SOURCE_UNREADABLE"))
+                    self.assertFalse(any(key in action for key in
+                                         ("source_sha256", "target_sha256", "content_relation")))
 
     def test_plan_requires_dry_run_and_rejects_apply(self):
         self.assertEqual(main(["plan"]), 64)
