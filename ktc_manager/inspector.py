@@ -77,6 +77,8 @@ def _source_state(entry, repo_root):
         info = os.lstat(str(source))
     except FileNotFoundError:
         return "SOURCE_MISSING", source
+    except PermissionError:
+        return "SOURCE_UNREADABLE", source
     except (OSError, RuntimeError):
         return "SOURCE_NOT_FILE", source
     if _stat_is_link_or_reparse(info) or not stat.S_ISREG(info.st_mode):
@@ -85,6 +87,8 @@ def _source_state(entry, repo_root):
         return "SOURCE_UNREADABLE", source
     try:
         source.resolve(strict=True).relative_to(repo_root)
+    except PermissionError:
+        return "SOURCE_UNREADABLE", source
     except (OSError, RuntimeError, ValueError):
         return "SOURCE_NOT_FILE", source
     return None, source

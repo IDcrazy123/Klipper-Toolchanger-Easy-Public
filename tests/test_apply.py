@@ -337,6 +337,32 @@ class ApplyTests(unittest.TestCase):
         symlink.assert_not_called()
         self.assertEqual(before, snapshot([self.root]))
 
+    def test_source_permission_errors_block_without_mutation_or_link(self):
+        source = self.repo / "source.txt"
+        real_lstat, real_resolve = os.lstat, Path.resolve
+        def deny_lstat(path):
+            if os.fspath(path) == str(source):
+                raise PermissionError("denied")
+            return real_lstat(path)
+        def deny_source(path, *args, **kwargs):
+            if path == source and kwargs.get("strict"):
+                raise PermissionError("denied")
+            return real_resolve(path, *args, **kwargs)
+
+        for check in ("lstat", "resolve"):
+            with self.subTest(check=check):
+                before = snapshot([self.root])
+                mocked_check = (patch("ktc_manager.inspector.os.lstat", side_effect=deny_lstat)
+                                if check == "lstat" else
+                                patch("ktc_manager.inspector.Path.resolve", autospec=True,
+                                      side_effect=deny_source))
+                with mocked_check, patch("ktc_manager.executor.os.symlink") as symlink:
+                    document, exit_code = self.apply()
+                self.assertEqual((document["result"], exit_code), ("BLOCKED", 10))
+                self.assertEqual(document["actions"][0]["code"], "SOURCE_UNREADABLE")
+                symlink.assert_not_called()
+                self.assertEqual(before, snapshot([self.root]))
+
     def test_source_revalidation_blocks_without_syscall(self):
         before = snapshot([self.root])
         with patch("ktc_manager.executor.revalidate_source",

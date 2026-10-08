@@ -78,6 +78,44 @@ class DoctorTests(unittest.TestCase):
         self.assertNotIn("source_sha256", changed)
         self.assertEqual(before, snapshot([self.repo, self.klipper, self.config]))
 
+    def test_source_permission_errors_are_unreadable_without_fingerprints(self):
+        source = self.repo / "source.txt"
+        real_resolve = Path.resolve
+        real_lstat = os.lstat
+        def deny_lstat(path):
+            if os.fspath(path) == str(source):
+                raise PermissionError("denied")
+            return real_lstat(path)
+        def deny_source(path, *args, **kwargs):
+            if path == source and kwargs.get("strict"):
+                raise PermissionError("denied")
+            return real_resolve(path, *args, **kwargs)
+
+        for check in ("lstat", "resolve"):
+            with self.subTest(check=check):
+                manifest_path = self.root / "manifest.json"
+                manifest_path.write_text(json.dumps({
+                    "schema_version": 1, "profile": "test", "entries": [{
+                        "id": "one", "owner": "vendor-managed", "source": "source.txt",
+                        "target_root": "config", "target": "target.txt", "delivery": "symlink"
+                    }]
+                }), encoding="utf-8")
+                output = StringIO()
+                mocked_check = (patch("ktc_manager.inspector.os.lstat", side_effect=deny_lstat)
+                                if check == "lstat" else
+                                patch("ktc_manager.inspector.Path.resolve", autospec=True,
+                                      side_effect=deny_source))
+                with mocked_check, redirect_stdout(output):
+                    exit_code = __import__("ktc_manager.cli", fromlist=["main"]).main([
+                        "doctor", "--format", "json", "--manifest", str(manifest_path),
+                        "--repo-root", str(self.repo), "--klipper-root", str(self.klipper),
+                        "--config-root", str(self.config)])
+                result = json.loads(output.getvalue())["results"][0]
+                self.assertEqual(exit_code, 10)
+                self.assertEqual(result["code"], "SOURCE_UNREADABLE")
+                self.assertFalse(any(key in result for key in
+                                     ("source_sha256", "target_sha256", "content_relation")))
+
     def test_target_appearing_during_selected_missing_hash_is_blocked_without_digest(self):
         target = self.config / "target.txt"
         real_stream = __import__("ktc_manager.inspector", fromlist=["_stream_file"])._stream_file
