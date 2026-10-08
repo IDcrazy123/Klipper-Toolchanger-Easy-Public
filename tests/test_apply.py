@@ -235,6 +235,29 @@ class ApplyTests(unittest.TestCase):
         document, code = self.blocked_unchanged(non_dir)
         self.assertEqual((document["actions"][0]["code"], code), ("TARGET_PARENT_NOT_DIRECTORY", 10))
 
+    def test_parent_resolve_permission_denied_blocks_without_mutation_or_link(self):
+        parent = self.config / "tool"
+        real_resolve = Path.resolve
+        def deny_parent(path, *args, **kwargs):
+            try:
+                is_parent = os.path.samefile(path, parent)
+            except OSError:
+                is_parent = os.path.normcase(os.path.abspath(os.fspath(path))) == \
+                    os.path.normcase(os.path.abspath(str(parent)))
+            if is_parent and kwargs.get("strict"):
+                raise PermissionError("denied")
+            return real_resolve(path, *args, **kwargs)
+
+        before = snapshot([self.root])
+        with patch("ktc_manager.inspector.Path.resolve", autospec=True,
+                   side_effect=deny_parent), \
+             patch("ktc_manager.executor.os.symlink") as symlink:
+            document, code = self.apply()
+        self.assertEqual((document["result"], code), ("BLOCKED", 10))
+        self.assertEqual(document["actions"][0]["code"], "PERMISSION_DENIED")
+        symlink.assert_not_called()
+        self.assertEqual(before, snapshot([self.root]))
+
     @unittest.skipIf(os.name == "nt", "symlink capability differs on Windows")
     def test_parent_symlink_and_escape(self):
         inside = self.config / "inside"

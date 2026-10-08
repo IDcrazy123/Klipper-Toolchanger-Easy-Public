@@ -51,6 +51,8 @@ Doctor and plan collision results may include raw-byte SHA-256 values for source
 
 A selected vendor `VENDOR_MISSING` result may include `source_sha256`, an informational hash that does not authorize apply. All-entry `VENDOR_MISSING` results and protected entries do not hash source content; existing collision fingerprint behavior is unchanged.
 
+If resolving the nearest existing target parent raises `PermissionError`, inspection reports `PERMISSION_DENIED` and blocks the operation; other resolve errors and confirmed escapes remain `TARGET_ESCAPE`. This is a point-in-time diagnostic, not a guarantee against later access changes or TOCTOU races.
+
 During the initial `_source_state` check, `PermissionError` from source metadata lookup (`lstat`) or strict source resolution is reported as `SOURCE_UNREADABLE`; that check does not fingerprint or link the source. This diagnostic is limited to those initial checks and does not guarantee access state or eliminate TOCTOU risk. Errors during late `revalidate_source` remain `SOURCE_CHANGED` and are outside this diagnostic change.
 
 ## Exit codes

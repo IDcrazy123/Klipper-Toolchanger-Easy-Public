@@ -58,17 +58,19 @@ def _source_path(entry, repo_root):
 
 def _target_escape(target, root):
     if not root.exists() or not root.is_dir():
-        return False
+        return None
     current = target.parent
     while not _lexists(current) and current != current.parent:
         current = current.parent
     try:
         existing_parent = current.resolve(strict=True)
+    except PermissionError:
+        return "PERMISSION_DENIED"
     except (OSError, RuntimeError):
-        return True
+        return "TARGET_ESCAPE"
     if not _inside(existing_parent, root):
-        return True
-    return False
+        return "TARGET_ESCAPE"
+    return None
 
 
 def _source_state(entry, repo_root):
@@ -368,8 +370,9 @@ def inspect_entry(entry: Entry, repo_root, roots):
     source_hint = _source_path(entry, repo) if entry.owner == "vendor-managed" else None
     if not root.exists() or not root.is_dir():
         return _result(entry, "TARGET_ROOT_UNAVAILABLE", target, source_hint)
-    if _target_escape(target, root):
-        return _result(entry, "TARGET_ESCAPE", target, source_hint)
+    target_escape = _target_escape(target, root)
+    if target_escape:
+        return _result(entry, target_escape, target, source_hint)
     if entry.owner != "vendor-managed":
         code = "PROTECTED_PRESENT" if _lexists(target) else "PROTECTED_MISSING"
         return _result(entry, code, target)

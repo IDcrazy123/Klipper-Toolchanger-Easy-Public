@@ -171,6 +171,50 @@ class PlanTests(unittest.TestCase):
                     self.assertFalse(any(key in action for key in
                                          ("source_sha256", "target_sha256", "content_relation")))
 
+    def test_plan_reports_parent_resolve_permission_denied_without_fingerprints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, klipper, config = root / "repo", root / "klipper", root / "config"
+            repo.mkdir(); klipper.mkdir(); config.mkdir()
+            parent = config / "parent"
+            parent.mkdir()
+            (repo / "source.txt").write_text("source", encoding="utf-8")
+            real_resolve = Path.resolve
+            def deny_parent(path, *args, **kwargs):
+                try:
+                    is_parent = os.path.samefile(path, parent)
+                except OSError:
+                    is_parent = os.path.normcase(os.path.abspath(os.fspath(path))) == \
+                        os.path.normcase(os.path.abspath(str(parent)))
+                if is_parent and kwargs.get("strict"):
+                    raise PermissionError("denied")
+                return real_resolve(path, *args, **kwargs)
+
+            manifest_path = root / "manifest.json"
+            for owner in ("vendor-managed", "user-managed", "machine-state"):
+                with self.subTest(owner=owner):
+                    item = {"id": "entry", "owner": owner, "target_root": "config",
+                            "target": "parent/target.cfg"}
+                    if owner == "vendor-managed":
+                        item.update(source="source.txt", delivery="symlink")
+                    manifest_path.write_text(json.dumps({
+                        "schema_version": 1, "profile": "test", "entries": [item]
+                    }), encoding="utf-8")
+                    output = io.StringIO()
+                    with patch("ktc_manager.inspector.Path.resolve", autospec=True,
+                               side_effect=deny_parent):
+                        with contextlib.redirect_stdout(output):
+                            exit_code = main([
+                                "plan", "--dry-run", "--format", "json", "--manifest",
+                                str(manifest_path), "--repo-root", str(repo),
+                                "--klipper-root", str(klipper), "--config-root", str(config)])
+                    action = json.loads(output.getvalue())["actions"][0]
+                    self.assertEqual(exit_code, 10)
+                    self.assertEqual((action["action"], action["code"]),
+                                     ("BLOCKED", "PERMISSION_DENIED"))
+                    self.assertFalse(any(key in action for key in
+                                         ("source_sha256", "target_sha256", "content_relation")))
+
     def test_plan_requires_dry_run_and_rejects_apply(self):
         self.assertEqual(main(["plan"]), 64)
         self.assertEqual(main(["apply"]), 64)
