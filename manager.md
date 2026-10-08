@@ -70,7 +70,7 @@ During the initial `_source_state` check, `PermissionError` from source metadata
 
 The manager trusts the repository/source tree and target roots/parents as user-owned paths and assumes no concurrent updater while a check is running. This is an operational assumption; it does not claim to eliminate TOCTOU risk against an actor mutating those paths.
 
-`install.sh` is a separate legacy mechanism with different and broader behavior. Do not treat manager fingerprints or a clean inspection as authorization to run it.
+`install.sh` is a separate legacy mechanism with different and broader behavior. It now exits by default; entering its old flow requires exactly one `--legacy-unsafe` argument. That flag only acknowledges risk and is not authorization from `doctor` or `plan`. This is not an instruction to run the installer on a printer, and upstream/fork status is not decided here. Do not treat manager fingerprints or a clean inspection as authorization to run it.
 
 ## Collision workflow — STOP / REVIEW REQUIRED
 
