@@ -582,6 +582,84 @@ class DoctorTests(unittest.TestCase):
         finally:
             self.config.chmod(0o700)
 
+    def test_doctor_reports_parent_resolve_permission_denied(self):
+        parent = self.config / "parent"
+        parent.mkdir()
+        real_resolve = Path.resolve
+        def deny_parent(path, *args, **kwargs):
+            try:
+                is_parent = os.path.samefile(path, parent)
+            except OSError:
+                is_parent = os.path.normcase(os.path.abspath(os.fspath(path))) == \
+                    os.path.normcase(os.path.abspath(str(parent)))
+            if is_parent and kwargs.get("strict"):
+                raise PermissionError("denied")
+            return real_resolve(path, *args, **kwargs)
+
+        manifest_path = self.root / "manifest.json"
+        for owner in ("vendor-managed", "user-managed", "machine-state"):
+            with self.subTest(owner=owner):
+                item = {"id": "entry", "owner": owner, "target_root": "config",
+                        "target": "parent/target.cfg"}
+                if owner == "vendor-managed":
+                    item.update(source="source.txt", delivery="symlink")
+                manifest_path.write_text(json.dumps({
+                    "schema_version": 1, "profile": "test", "entries": [item]
+                }), encoding="utf-8")
+                output = StringIO()
+                with patch("ktc_manager.inspector.Path.resolve", autospec=True,
+                           side_effect=deny_parent), redirect_stdout(output):
+                    exit_code = __import__("ktc_manager.cli", fromlist=["main"]).main([
+                        "doctor", "--format", "json", "--manifest", str(manifest_path),
+                        "--repo-root", str(self.repo), "--klipper-root", str(self.klipper),
+                        "--config-root", str(self.config)])
+                result = json.loads(output.getvalue())["results"][0]
+                self.assertEqual(exit_code, 10)
+                self.assertEqual(result["code"], "PERMISSION_DENIED")
+                self.assertFalse(any(key in result for key in
+                                     ("source_sha256", "target_sha256", "content_relation")))
+
+    def test_other_parent_resolve_errors_remain_target_escape(self):
+        parent = self.config / "parent"
+        parent.mkdir()
+        real_resolve = Path.resolve
+        def deny_parent(error_type):
+            def resolve(path, *args, **kwargs):
+                try:
+                    is_parent = os.path.samefile(path, parent)
+                except OSError:
+                    is_parent = os.path.normcase(os.path.abspath(os.fspath(path))) == \
+                        os.path.normcase(os.path.abspath(str(parent)))
+                if is_parent and kwargs.get("strict"):
+                    raise error_type("denied")
+                return real_resolve(path, *args, **kwargs)
+            return resolve
+
+        manifest_path = self.root / "manifest.json"
+        for owner in ("vendor-managed", "user-managed"):
+            item = {"id": "entry", "owner": owner, "target_root": "config",
+                    "target": "parent/target.cfg"}
+            if owner == "vendor-managed":
+                item.update(source="source.txt", delivery="symlink")
+            manifest_path.write_text(json.dumps({
+                "schema_version": 1, "profile": "test", "entries": [item]
+            }), encoding="utf-8")
+            for error_type in (OSError, RuntimeError):
+                with self.subTest(owner=owner, error=error_type.__name__):
+                    with patch("ktc_manager.inspector.Path.resolve", autospec=True,
+                               side_effect=deny_parent(error_type)):
+                        direct = inspect(one_entry(owner, "parent/target.cfg"), self.repo,
+                                         self.klipper, self.config)[0]
+                        output = StringIO()
+                        with redirect_stdout(output):
+                            exit_code = __import__("ktc_manager.cli", fromlist=["main"]).main([
+                                "doctor", "--format", "json", "--manifest", str(manifest_path),
+                                "--repo-root", str(self.repo), "--klipper-root", str(self.klipper),
+                                "--config-root", str(self.config)])
+                    result = json.loads(output.getvalue())["results"][0]
+                    self.assertEqual(direct["code"], "TARGET_ESCAPE")
+                    self.assertEqual((result["code"], exit_code), ("TARGET_ESCAPE", 10))
+
     def test_snapshot_unchanged_after_doctor(self):
         paths = [self.repo / "source.txt", self.config / "target.txt", self.config]
         before = snapshot(paths)
