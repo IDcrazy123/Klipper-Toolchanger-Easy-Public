@@ -49,6 +49,8 @@ The TAP profile is identical to the default `voron-5-tool-cartographer` profile 
 
 Doctor and plan collision results may include raw-byte SHA-256 values for source and target plus `content_relation`. The relation distinguishes identical bytes, equality after only CRLF normalization, and different bytes. Fingerprints can become stale and never authorize a write or legacy installer run.
 
+A selected vendor `VENDOR_MISSING` result may include `source_sha256`, an informational hash that does not authorize apply. All-entry `VENDOR_MISSING` results and protected entries do not hash source content; existing collision fingerprint behavior is unchanged.
+
 ## Exit codes
 
 - `0`: no blocker, or a successful/no-op apply.

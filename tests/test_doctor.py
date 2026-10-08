@@ -45,9 +45,11 @@ class DoctorTests(unittest.TestCase):
         return inspect(manifest or one_entry(), self.repo, self.klipper, self.config)[0]
 
     def test_missing_vendor_does_not_create_parent(self):
-        result = self.run_one()
+        with patch("ktc_manager.inspector._stream_file") as stream_file:
+            result = self.run_one()
         self.assertEqual(result["code"], "VENDOR_MISSING")
         self.assertNotIn("source_sha256", result)
+        stream_file.assert_not_called()
         self.assertFalse((self.config / "target.txt").exists())
         self.assertFalse((self.config / "new").exists())
 
@@ -93,11 +95,71 @@ class DoctorTests(unittest.TestCase):
         fingerprints.assert_not_called()
         self.assertEqual(target.read_bytes(), b"racer")
 
-    def test_selected_protected_entry_has_no_source_digest(self):
-        result = inspect(one_entry("user-managed", "protected.cfg"),
-                         self.repo, self.klipper, self.config, "one")[0]
-        self.assertEqual(result["code"], "PROTECTED_MISSING")
-        self.assertNotIn("source_sha256", result)
+    def test_all_entry_protected_statuses_do_not_stream_source_content(self):
+        for owner, target in (("user-managed", "user.cfg"),
+                              ("machine-state", "printer.cfg")):
+            for present in (False, True):
+                target_path = self.config / target
+                if present:
+                    target_path.write_text("keep", encoding="utf-8")
+                with patch("ktc_manager.inspector._stream_file") as stream_file:
+                    result = inspect(one_entry(owner, target), self.repo,
+                                     self.klipper, self.config)[0]
+                self.assertEqual(result["code"],
+                                 "PROTECTED_PRESENT" if present else "PROTECTED_MISSING")
+                self.assertNotIn("source_sha256", result)
+                stream_file.assert_not_called()
+                if present:
+                    target_path.unlink()
+
+    def test_selected_protected_statuses_have_no_source_digest_or_stream(self):
+        for present in (False, True):
+            target = self.config / "protected.cfg"
+            if present:
+                target.write_text("keep", encoding="utf-8")
+            with patch("ktc_manager.inspector._stream_file") as stream_file:
+                result = inspect(one_entry("user-managed", "protected.cfg"),
+                                 self.repo, self.klipper, self.config, "one")[0]
+            self.assertEqual(result["code"],
+                             "PROTECTED_PRESENT" if present else "PROTECTED_MISSING")
+            self.assertNotIn("source_sha256", result)
+            stream_file.assert_not_called()
+            if present:
+                target.unlink()
+
+    def test_doctor_cli_protected_statuses_do_not_stream_source_content(self):
+        manifest_path = self.root / "manifest.json"
+        for owner, target in (("user-managed", "user.cfg"),
+                              ("machine-state", "printer.cfg")):
+            for present in (False, True):
+                target_path = self.config / target
+                if present:
+                    target_path.write_text("keep", encoding="utf-8")
+                manifest_path.write_text(json.dumps({
+                    "schema_version": 1, "profile": "test", "entries": [{
+                        "id": "protected", "owner": owner,
+                        "target_root": "config", "target": target
+                    }]
+                }), encoding="utf-8")
+                output = StringIO()
+                with patch("ktc_manager.inspector._stream_file") as stream_file, \
+                     redirect_stdout(output):
+                    exit_code = __import__("ktc_manager.cli", fromlist=["main"]).main([
+                        "doctor", "--format", "json", "--manifest", str(manifest_path),
+                        "--repo-root", str(self.repo), "--klipper-root", str(self.klipper),
+                        "--config-root", str(self.config)])
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(json.loads(output.getvalue())["results"][0]["code"],
+                                 "PROTECTED_PRESENT" if present else "PROTECTED_MISSING")
+                stream_file.assert_not_called()
+                if present:
+                    target_path.unlink()
+
+    def test_unknown_id_does_not_stream_source_content(self):
+        with patch("ktc_manager.inspector._stream_file") as stream_file:
+            result = inspect(one_entry(), self.repo, self.klipper, self.config, "unknown")[0]
+        self.assertEqual(result["code"], "UNKNOWN_ID")
+        stream_file.assert_not_called()
 
     def test_selected_entry_returns_one_fingerprinted_result_and_unknown_touches_no_roots(self):
         target = self.config / "target.txt"
