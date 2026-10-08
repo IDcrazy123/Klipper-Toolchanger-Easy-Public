@@ -47,8 +47,57 @@ class DoctorTests(unittest.TestCase):
     def test_missing_vendor_does_not_create_parent(self):
         result = self.run_one()
         self.assertEqual(result["code"], "VENDOR_MISSING")
+        self.assertNotIn("source_sha256", result)
         self.assertFalse((self.config / "target.txt").exists())
         self.assertFalse((self.config / "new").exists())
+
+    def test_selected_missing_vendor_includes_raw_source_digest_read_only(self):
+        source_bytes = b"source\x00with\r\nbytes"
+        (self.repo / "source.txt").write_bytes(source_bytes)
+        before = snapshot([self.repo, self.klipper, self.config])
+        result = inspect(one_entry(), self.repo, self.klipper, self.config, "one")[0]
+        self.assertEqual(result["code"], "VENDOR_MISSING")
+        self.assertEqual(result["source_sha256"], hashlib.sha256(source_bytes).hexdigest())
+        self.assertFalse((self.config / "target.txt").exists())
+        self.assertEqual(before, snapshot([self.repo, self.klipper, self.config]))
+
+    def test_selected_missing_digest_fails_closed_on_read_failure_or_source_change(self):
+        before = snapshot([self.repo, self.klipper, self.config])
+        with patch("ktc_manager.inspector._stream_file",
+                   return_value=("SOURCE_UNREADABLE", None)):
+            unreadable = inspect(one_entry(), self.repo, self.klipper, self.config, "one")[0]
+        self.assertEqual(unreadable["code"], "SOURCE_UNREADABLE")
+        self.assertNotIn("source_sha256", unreadable)
+
+        with patch("ktc_manager.inspector._stream_file",
+                   return_value=(None, {"raw_sha256": "a" * 64, "state": ()})):
+            changed = inspect(one_entry(), self.repo, self.klipper, self.config, "one")[0]
+        self.assertEqual(changed["code"], "SOURCE_CHANGED")
+        self.assertNotIn("source_sha256", changed)
+        self.assertEqual(before, snapshot([self.repo, self.klipper, self.config]))
+
+    def test_target_appearing_during_selected_missing_hash_is_blocked_without_digest(self):
+        target = self.config / "target.txt"
+        real_stream = __import__("ktc_manager.inspector", fromlist=["_stream_file"])._stream_file
+
+        def create_target_during_hash(path, role):
+            target.write_bytes(b"racer")
+            return real_stream(path, role)
+
+        with patch("ktc_manager.inspector._stream_file", side_effect=create_target_during_hash), \
+             patch("ktc_manager.inspector._collision_fingerprints") as fingerprints:
+            result = inspect(one_entry(), self.repo, self.klipper, self.config, "one")[0]
+        self.assertEqual(result["code"], "TARGET_CHANGED")
+        self.assertFalse(any(key in result for key in
+                             ("source_sha256", "target_sha256", "content_relation")))
+        fingerprints.assert_not_called()
+        self.assertEqual(target.read_bytes(), b"racer")
+
+    def test_selected_protected_entry_has_no_source_digest(self):
+        result = inspect(one_entry("user-managed", "protected.cfg"),
+                         self.repo, self.klipper, self.config, "one")[0]
+        self.assertEqual(result["code"], "PROTECTED_MISSING")
+        self.assertNotIn("source_sha256", result)
 
     def test_selected_entry_returns_one_fingerprinted_result_and_unknown_touches_no_roots(self):
         target = self.config / "target.txt"

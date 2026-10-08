@@ -1,4 +1,7 @@
 import json
+import hashlib
+import io
+import contextlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -65,6 +68,37 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(code, 10)
             self.assertEqual(document["actions"][0]["action"], "BLOCKED")
             self.assertEqual(document["actions"][0]["code"], "TARGET_PARENT_MISSING")
+
+    def test_selected_missing_source_digest_in_doctor_and_plan(self):
+        source_bytes = b"selected source\r\nraw bytes"
+        manifest_data = {"schema_version": 1, "profile": "selected-test", "entries": [{
+            "id": "vendor", "owner": "vendor-managed", "source": "source.txt",
+            "target_root": "config", "target": "tool/target.py", "delivery": "symlink"
+        }]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, config, klipper = root / "repo", root / "config", root / "klipper"
+            repo.mkdir(); config.mkdir(); klipper.mkdir()
+            (repo / "source.txt").write_bytes(source_bytes)
+            (config / "tool").mkdir()
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+            before = snapshot([repo, config, klipper])
+            for command in (("doctor",), ("plan", "--dry-run")):
+                stream = io.StringIO()
+                with contextlib.redirect_stdout(stream):
+                    code = main(list(command) + ["--id", "vendor", "--manifest", str(manifest_path),
+                                                 "--repo-root", str(repo), "--config-root", str(config),
+                                                 "--klipper-root", str(klipper), "--format", "json"])
+                self.assertEqual(code, 0)
+                document = json.loads(stream.getvalue())
+                result = document["results"][0] if command[0] == "doctor" else document["actions"][0]
+                self.assertEqual(result["code"], "VENDOR_MISSING")
+                self.assertEqual(result["source_sha256"], hashlib.sha256(source_bytes).hexdigest())
+                if command[0] == "plan":
+                    self.assertEqual(result["action"], "WOULD_LINK")
+            self.assertFalse((config / "tool/target.py").exists())
+            self.assertEqual(before, snapshot([repo, config, klipper]))
 
     def test_collision_remains_blocked_with_fingerprints(self):
         manifest = {

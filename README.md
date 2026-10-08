@@ -62,6 +62,8 @@ python3 -B -m ktc_manager plan --dry-run --id ID --manifest MANIFEST
 
 Read and confirm the exact, case-sensitive `profile` and `manifest_sha256` in the doctor/plan output. Only a `VENDOR_MISSING` item whose existing target parent is present may use the single-entry command below, with the same manifest selector and exact profile and digest:
 
+For a selected vendor entry reported as `VENDOR_MISSING`, doctor/plan also report `source_sha256`, the SHA-256 of the source file's original bytes. This value is informational and does not authorize apply. All-entry `VENDOR_MISSING` results and protected entries do not include this field; collision fingerprints are unchanged.
+
 ```text
 python3 -B -m ktc_manager apply --id ID --expect-profile PROFILE --expect-manifest-sha256 SHA256 --manifest MANIFEST
 ```
