@@ -18,7 +18,9 @@ Read the [KTC-Easy Manager Safety Guide](manager.md) before inspecting or changi
 
 # Legacy installation
 
-`install.sh` is a legacy installer outside the manager's guarantees. It uses force-link operations, creates directories, copies files, and restarts Klipper. It may alter an existing layout, so do not treat repeated runs as safe or idempotent. Review the manager guide first; regular-file collisions and old-layout migration are STOP / REVIEW REQUIRED and unsupported by the manager.
+Breaking safety change: `install.sh` now refuses to start by default. Exactly one `--legacy-unsafe` argument is required to enter the legacy flow; `--help` only displays its usage. The flag acknowledges risk but is not a safety check or authorization from `doctor`/`plan`. This documentation is not an instruction to run the installer on a printer, and this change makes no decision about upstream or fork status.
+
+`install.sh` remains a legacy installer outside the manager's guarantees. It uses force-link operations, creates directories, copies files, and restarts Klipper. It may alter an existing layout, so do not treat repeated runs as safe or idempotent. Review the manager guide first; regular-file collisions and old-layout migration are STOP / REVIEW REQUIRED and unsupported by the manager.
 
 The legacy script does the following:
 

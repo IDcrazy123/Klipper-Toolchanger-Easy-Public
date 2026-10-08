@@ -1,11 +1,24 @@
 #!/bin/bash
+set -eu
+
+if [ "$#" -eq 1 ] && [ "$1" = "--help" ]; then
+    printf '%s\n' "Usage: install.sh --legacy-unsafe" "       install.sh --help"
+    printf '%s\n' "The legacy installer can change configuration and restart Klipper."
+    exit 0
+fi
+
+if [ "$#" -ne 1 ] || [ "$1" != "--legacy-unsafe" ]; then
+    printf '%s\n' "Usage: install.sh --legacy-unsafe (or --help)" >&2
+    exit 64
+fi
+
+printf '%s\n' "[WARNING] Legacy installer may modify configuration and restart Klipper; --legacy-unsafe acknowledges risk only and is not authorized by doctor/plan." >&2
 
 KLIPPER_PATH="${HOME}/klipper"
 KLIPPY_ENV_PATH="${HOME}/klippy-env"
 INSTALL_PATH="${HOME}/klipper-toolchanger-easy"
 CONFIG_PATH="${HOME}/printer_data/config"
 
-set -eu
 export LC_ALL=C
 
 function preflight_checks {
