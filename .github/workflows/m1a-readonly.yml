@@ -20,6 +20,11 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -B -c "from pathlib import Path; [compile(path.read_text(encoding='utf-8'), str(path), 'exec') for path in sorted(Path('ktc_manager').glob('*.py'))]"
+      - name: Compile Klipper extras without importing
+        run: python -B -c "from pathlib import Path; paths = sorted(Path('klipper/extras').glob('*.py')); assert paths, 'no klipper/extras Python files found'; [compile(path.read_bytes(), str(path), 'exec') for path in paths]"
+      - name: Check installer shell syntax
+        if: matrix.os == 'ubuntu-latest'
+        run: bash -n install.sh
       - run: python -B -m unittest discover -s tests -v
       - run: git diff --check
       - run: >-
