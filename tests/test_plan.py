@@ -137,12 +137,18 @@ class PlanTests(unittest.TestCase):
                 }]
             }), encoding="utf-8")
             real_lstat, real_resolve = os.lstat, Path.resolve
+            def is_source(path):
+                try:
+                    return os.path.samefile(path, source)
+                except OSError:
+                    return os.path.normcase(os.path.abspath(os.fspath(path))) == \
+                        os.path.normcase(os.path.abspath(str(source)))
             def deny_lstat(path):
-                if os.fspath(path) == str(source):
+                if is_source(path):
                     raise PermissionError("denied")
                 return real_lstat(path)
             def deny_source(path, *args, **kwargs):
-                if path == source and kwargs.get("strict"):
+                if is_source(path) and kwargs.get("strict"):
                     raise PermissionError("denied")
                 return real_resolve(path, *args, **kwargs)
 
