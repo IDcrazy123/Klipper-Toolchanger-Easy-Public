@@ -5,6 +5,7 @@ import contextlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ktc_manager.cli import main
 from ktc_manager.inspector import inspect, plan_actions, snapshot, summary
@@ -39,6 +40,86 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(sum(a["action"] == "PRESERVE_MISSING" for a in actions), 7)
             self.assertFalse(any(a["action"] == "BLOCKED" for a in actions))
             self.assertEqual(summary(actions, "action")["blockers"], 0)
+
+    def test_all_entry_missing_and_protected_plan_do_not_stream_source_content(self):
+        manifest_data = {"schema_version": 1, "profile": "read-boundary", "entries": [{
+            "id": "vendor", "owner": "vendor-managed", "source": "source.txt",
+            "target_root": "config", "target": "target.py", "delivery": "symlink"
+        }]}
+        protected_data = {"schema_version": 1, "profile": "read-boundary", "entries": [
+            {"id": "protected-user", "owner": "user-managed",
+             "target_root": "config", "target": "user.cfg"},
+            {"id": "protected-machine", "owner": "machine-state",
+             "target_root": "config", "target": "printer.cfg"},
+        ]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, klipper, config = root / "repo", root / "klipper", root / "config"
+            repo.mkdir(); klipper.mkdir(); config.mkdir()
+            (repo / "source.txt").write_bytes(b"source")
+            cases = ((manifest_data, None, ["VENDOR_MISSING"], ["WOULD_LINK"], 0, ()),
+                     (protected_data, None,
+                      ["PROTECTED_MISSING", "PROTECTED_MISSING"],
+                      ["PRESERVE_MISSING", "PRESERVE_MISSING"], 0, ()),
+                     (protected_data, None,
+                      ["PROTECTED_PRESENT", "PROTECTED_PRESENT"],
+                      ["PRESERVE", "PRESERVE"], 0, ("user.cfg", "printer.cfg")),
+                     (manifest_data, "unknown", ["UNKNOWN_ID"], ["BLOCKED"], 10, ()))
+            manifest_path = root / "manifest.json"
+            for data, entry_id, expected_codes, expected_actions, expected_exit, existing in cases:
+                for target in existing:
+                    (config / target).write_text("keep", encoding="utf-8")
+                manifest_path.write_text(json.dumps(data), encoding="utf-8")
+                args = ["plan", "--dry-run", "--manifest", str(manifest_path),
+                        "--repo-root", str(repo), "--klipper-root", str(klipper),
+                        "--config-root", str(config), "--format", "json"]
+                if entry_id is not None:
+                    args.extend(("--id", entry_id))
+                stream = io.StringIO()
+                with patch("ktc_manager.inspector._stream_file") as stream_file:
+                    with contextlib.redirect_stdout(stream):
+                        exit_code = main(args)
+                self.assertEqual(exit_code, expected_exit)
+                actions = json.loads(stream.getvalue())["actions"]
+                self.assertEqual([action["code"] for action in actions], expected_codes)
+                self.assertEqual([action["action"] for action in actions], expected_actions)
+                stream_file.assert_not_called()
+                for target in existing:
+                    (config / target).unlink()
+
+    def test_selected_protected_plan_does_not_stream_source_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo, klipper, config = root / "repo", root / "klipper", root / "config"
+            repo.mkdir(); klipper.mkdir(); config.mkdir()
+            manifest_path = root / "manifest.json"
+            for owner, target in (("user-managed", "user.cfg"),
+                                  ("machine-state", "printer.cfg")):
+                for present in (False, True):
+                    target_path = config / target
+                    if present:
+                        target_path.write_text("keep", encoding="utf-8")
+                    manifest_path.write_text(json.dumps({
+                        "schema_version": 1, "profile": "read-boundary", "entries": [{
+                            "id": "protected", "owner": owner,
+                            "target_root": "config", "target": target
+                        }]
+                    }), encoding="utf-8")
+                    output = io.StringIO()
+                    with patch("ktc_manager.inspector._stream_file") as stream_file:
+                        with contextlib.redirect_stdout(output):
+                            exit_code = main([
+                                "plan", "--dry-run", "--format", "json", "--id", "protected",
+                                "--manifest", str(manifest_path), "--repo-root", str(repo),
+                                "--klipper-root", str(klipper), "--config-root", str(config)])
+                    action = json.loads(output.getvalue())["actions"][0]
+                    self.assertEqual(exit_code, 0)
+                    self.assertEqual(action["code"],
+                                     "PROTECTED_PRESENT" if present else "PROTECTED_MISSING")
+                    self.assertEqual(action["action"], "PRESERVE" if present else "PRESERVE_MISSING")
+                    stream_file.assert_not_called()
+                    if present:
+                        target_path.unlink()
 
     def test_plan_requires_dry_run_and_rejects_apply(self):
         self.assertEqual(main(["plan"]), 64)
